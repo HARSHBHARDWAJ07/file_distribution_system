@@ -1,0 +1,11 @@
+{
+  "name": "@cloudstore/auth-service",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": { "dev": "node index.js" },
+  "dependencies": {
+    "@cloudstore/shared-types": "*",
+    "express": "^4.19.2"
+  }
+}

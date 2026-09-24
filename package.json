@@ -1,0 +1,15 @@
+{
+  "name": "file-distribution-system",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:auth": "npm run dev --workspace=apps/auth-service",
+    "dev:gateway": "npm run dev --workspace=apps/gateway",
+    "lint": "echo \"(placeholder) no linter configured yet\" && exit 0",
+    "test": "echo \"(placeholder) no tests yet\" && exit 0"
+  }
+}
