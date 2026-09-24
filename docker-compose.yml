@@ -8,7 +8,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./apps/auth-service/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./apps/auth-service/db/schema.sql:/docker-entrypoint-initdb.d/01-auth-schema.sql
+      - ./apps/file-service/db/schema.sql:/docker-entrypoint-initdb.d/02-file-schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cloudstore"]
       interval: 2s
@@ -24,6 +25,34 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  # MinIO's Docker images now require a paid subscription to pull, so local
+  # dev uses LocalStack's S3 emulation instead - same S3-compatible API,
+  # same storage.js code path, still free to pull and run.
+  s3-mock:
+    image: localstack/localstack:3.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  s3-mock-init:
+    image: amazon/aws-cli
+    depends_on:
+      s3-mock:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command: >
+      -c "aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3 mb s3://cloudstore"
+    environment:
+      - AWS_ACCESS_KEY_ID=localkey
+      - AWS_SECRET_ACCESS_KEY=localsecret
 
   auth-service:
     build:
@@ -42,6 +71,27 @@ services:
       redis:
         condition: service_healthy
 
+  file-service:
+    build:
+      context: .
+      dockerfile: apps/file-service/Dockerfile
+    ports:
+      - "4002:4002"
+    environment:
+      - PORT=4002
+      - DATABASE_URL=postgres://cloudstore:cloudstore@postgres:5432/cloudstore
+      - STORAGE_ENDPOINT=http://s3-mock:4566
+      - STORAGE_REGION=us-east-1
+      - STORAGE_BUCKET=cloudstore
+      - STORAGE_ACCESS_KEY_ID=localkey
+      - STORAGE_SECRET_ACCESS_KEY=localsecret
+      - STORAGE_PUBLIC_ENDPOINT=http://localhost:4566
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3-mock-init:
+        condition: service_completed_successfully
+
   gateway:
     build:
       context: .
@@ -51,6 +101,8 @@ services:
     environment:
       - PORT=4000
       - AUTH_SERVICE_URL=http://auth-service:4001
+      - FILE_SERVICE_URL=http://file-service:4002
       - JWT_SECRET=local-dev-secret-change-me
     depends_on:
       - auth-service
+      - file-service

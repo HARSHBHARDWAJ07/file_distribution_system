@@ -9,7 +9,8 @@
   "scripts": {
     "dev:auth": "npm run dev --workspace=apps/auth-service",
     "dev:gateway": "npm run dev --workspace=apps/gateway",
+    "dev:files": "npm run dev --workspace=apps/file-service",
     "lint": "echo \"(placeholder) no linter configured yet\" && exit 0",
-    "test": "npm test --workspace=apps/auth-service"
+    "test": "npm test --workspace=apps/auth-service && npm test --workspace=apps/file-service"
   }
 }
