@@ -19,6 +19,7 @@ async function forward(path, req, res) {
     const data = await upstream.json();
     res.status(upstream.status).json(data);
   } catch (err) {
+    console.error(`[gateway] forward to auth-service (${AUTH_SERVICE_URL}${path}) failed:`, err);
     res.status(502).json(fail('UPSTREAM_UNREACHABLE', 'auth-service did not respond'));
   }
 }
@@ -43,6 +44,7 @@ async function forwardFile(path, req, res) {
     const data = await upstream.json();
     res.status(upstream.status).json(data);
   } catch (err) {
+    console.error(`[gateway] forward to file-service (${FILE_SERVICE_URL}${path}) failed:`, err);
     res.status(502).json(fail('UPSTREAM_UNREACHABLE', 'file-service did not respond'));
   }
 }
@@ -67,4 +69,6 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`[gateway] listening on port ${PORT}`);
+  console.log(`[gateway] AUTH_SERVICE_URL=${AUTH_SERVICE_URL}`);
+  console.log(`[gateway] FILE_SERVICE_URL=${FILE_SERVICE_URL}`);
 });
