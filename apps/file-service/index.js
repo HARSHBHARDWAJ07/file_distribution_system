@@ -1,5 +1,6 @@
 const express = require('express');
-const { ok } = require('@cloudstore/shared-types');
+const { ok, fail } = require('@cloudstore/shared-types');
+const { asyncHandler } = require('./lib/asyncHandler');
 const { initUpload } = require('./routes/initUpload');
 const { completeUpload } = require('./routes/completeUpload');
 const { getPartUploadUrl, recordPartUploaded, getUploadStatus } = require('./routes/chunkUpload');
@@ -14,14 +15,20 @@ app.get('/health', (req, res) => {
   res.json(ok({ status: 'healthy' }));
 });
 
-app.post('/uploads/init', initUpload);
-app.get('/uploads/:fileId/status', getUploadStatus);
-app.get('/uploads/:fileId/parts/:partNumber', getPartUploadUrl);
-app.post('/uploads/:fileId/parts/:partNumber', recordPartUploaded);
-app.post('/uploads/:fileId/complete', completeUpload);
+app.post('/uploads/init', asyncHandler(initUpload));
+app.get('/uploads/:fileId/status', asyncHandler(getUploadStatus));
+app.get('/uploads/:fileId/parts/:partNumber', asyncHandler(getPartUploadUrl));
+app.post('/uploads/:fileId/parts/:partNumber', asyncHandler(recordPartUploaded));
+app.post('/uploads/:fileId/complete', asyncHandler(completeUpload));
 
-app.get('/files/:fileId/download', downloadFile);
-app.delete('/files/:fileId', deleteFile);
+app.get('/files/:fileId/download', asyncHandler(downloadFile));
+app.delete('/files/:fileId', asyncHandler(deleteFile));
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('[file-service] unhandled route error:', err);
+  res.status(500).json(fail('INTERNAL_ERROR', 'an unexpected error occurred'));
+});
 
 app.listen(PORT, () => {
   console.log(`[file-service] listening on port ${PORT}`);
