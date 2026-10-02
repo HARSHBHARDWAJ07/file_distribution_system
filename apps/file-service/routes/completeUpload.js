@@ -1,6 +1,7 @@
 const { pool } = require('../lib/db');
 const storage = require('../lib/storage');
 const { getFileById } = require('../lib/files');
+const { enqueueFileUploaded } = require('@cloudstore/queue');
 const { ok, fail } = require('@cloudstore/shared-types');
 
 async function completeUpload(req, res) {
@@ -16,6 +17,10 @@ async function completeUpload(req, res) {
     return res.status(403).json(fail('FORBIDDEN', 'you do not have access to this file'));
   }
   if (file.status === 'complete') { // idempotent: a client retry is not an error
+    // Re-enqueue in case the first attempt flipped status but crashed before
+    // enqueueing. singletonKey dedupes a still-queued job, and the worker's
+    // planWork turns an already-processed file into a no-op.
+    await enqueueFileUploaded({ fileId, storageKey: file.storage_key, contentType: file.content_type });
     return res.json(ok({ fileId, status: 'complete', alreadyCompleted: true }));
   }
 
@@ -29,6 +34,9 @@ async function completeUpload(req, res) {
   // single-shot needs no storage action here - the client's PUT already landed the object
 
   await pool.query(`UPDATE files SET status = 'complete', completed_at = now() WHERE id = $1`, [fileId]);
+  // Post-processing (thumbnail, replication) happens in apps/worker; this is
+  // just one row written to pg-boss's job table, so the response stays fast.
+  await enqueueFileUploaded({ fileId, storageKey: file.storage_key, contentType: file.content_type });
   return res.json(ok({ fileId, status: 'complete' }));
 }
 

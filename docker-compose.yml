@@ -10,6 +10,7 @@ services:
     volumes:
       - ./apps/auth-service/db/schema.sql:/docker-entrypoint-initdb.d/01-auth-schema.sql
       - ./apps/file-service/db/schema.sql:/docker-entrypoint-initdb.d/02-file-schema.sql
+      - ./apps/file-service/db/migration_phase3.sql:/docker-entrypoint-initdb.d/03-file-phase3.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cloudstore"]
       interval: 2s
@@ -86,6 +87,24 @@ services:
       - STORAGE_ACCESS_KEY_ID=localkey
       - STORAGE_SECRET_ACCESS_KEY=localsecret
       - STORAGE_PUBLIC_ENDPOINT=http://localhost:4566
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3-mock-init:
+        condition: service_completed_successfully
+
+  # Background worker: no ports - it only consumes the pg-boss queue.
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://cloudstore:cloudstore@postgres:5432/cloudstore
+      - STORAGE_ENDPOINT=http://s3-mock:4566
+      - STORAGE_REGION=us-east-1
+      - STORAGE_BUCKET=cloudstore
+      - STORAGE_ACCESS_KEY_ID=localkey
+      - STORAGE_SECRET_ACCESS_KEY=localsecret
     depends_on:
       postgres:
         condition: service_healthy

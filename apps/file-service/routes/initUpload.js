@@ -15,9 +15,9 @@ async function initUpload(req, res) {
   const chunked = shouldUseChunkedUpload(sizeBytes);
 
   const { rows } = await pool.query(
-    `INSERT INTO files (owner_id, filename, size_bytes, storage_key, status)
-     VALUES ($1, $2, $3, $4, 'uploading') RETURNING id`,
-    [ownerId, filename, sizeBytes, storageKey]
+    `INSERT INTO files (owner_id, filename, size_bytes, storage_key, status, content_type)
+     VALUES ($1, $2, $3, $4, 'uploading', $5) RETURNING id`,
+    [ownerId, filename, sizeBytes, storageKey, contentType || null]
   );
   const fileId = rows[0].id;
 

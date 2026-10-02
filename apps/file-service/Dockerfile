@@ -1,9 +1,10 @@
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 
 COPY package.json ./
 COPY apps/file-service/package.json apps/file-service/package.json
 COPY packages/shared-types packages/shared-types
+COPY packages/queue packages/queue
 RUN npm install --workspace=apps/file-service --omit=dev
 
 COPY apps/file-service apps/file-service

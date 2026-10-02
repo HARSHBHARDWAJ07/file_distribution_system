@@ -1,0 +1,9 @@
+{
+  "name": "@cloudstore/queue",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "pg-boss": "^12.35.1"
+  }
+}
