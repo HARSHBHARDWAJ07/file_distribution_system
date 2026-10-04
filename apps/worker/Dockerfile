@@ -8,5 +8,6 @@ RUN npm install --workspace=apps/worker --omit=dev
 
 COPY apps/worker apps/worker
 
-# No EXPOSE: the worker never accepts inbound traffic.
+# No EXPOSE: locally the worker has no HTTP at all. On Render (free Web
+# Service) it binds $PORT for a read-only /health endpoint only.
 CMD ["node", "apps/worker/index.js"]

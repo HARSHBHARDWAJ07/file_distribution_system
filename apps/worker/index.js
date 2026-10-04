@@ -1,10 +1,28 @@
-// Background worker: consumes file.uploaded jobs. Deliberately never opens an
-// HTTP port - it only talks to Postgres (queue + metadata) and object storage.
+// Background worker: consumes file.uploaded jobs. Its real work only touches
+// Postgres (queue + metadata) and object storage - no HTTP API. The one
+// exception is a read-only /health endpoint, started only when PORT is set:
+// Render's free tier has no Background Worker type, so in production this
+// runs as a free Web Service that needs a port to bind and something to ping.
+const http = require('http');
 const { getBoss, QUEUES } = require('@cloudstore/queue');
 const { pool } = require('./lib/db');
 const { planWork } = require('./lib/workPlan');
 const { generateThumbnail } = require('./jobs/generateThumbnail');
 const { replicateFile } = require('./jobs/replicate');
+
+const stats = { startedAt: new Date().toISOString(), jobsSucceeded: 0, jobsFailed: 0, lastJobAt: null };
+
+function startHealthServer(port) {
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: true, data: { status: 'worker healthy', queue: QUEUES.FILE_UPLOADED, ...stats } }));
+    }
+    res.writeHead(404).end();
+  });
+  server.listen(port, () => console.log(`[worker] health endpoint on port ${port}`));
+  return server;
+}
 
 async function handleFileUploaded(job) {
   const { fileId } = job.data;
@@ -45,9 +63,12 @@ async function main() {
   // burst of concurrent sharp resizes is an easy way to get OOM-killed.
   await boss.work(QUEUES.FILE_UPLOADED, { localConcurrency: 2 }, async jobs => {
     for (const job of jobs) {
+      stats.lastJobAt = new Date().toISOString();
       try {
         await handleFileUploaded(job);
+        stats.jobsSucceeded++;
       } catch (err) {
+        stats.jobsFailed++;
         console.error(`[worker] job ${job.id} failed, will retry`, err);
         throw err; // rethrow so pg-boss applies its retry/backoff policy
       }
@@ -55,8 +76,11 @@ async function main() {
   });
   console.log(`[worker] consuming ${QUEUES.FILE_UPLOADED}`);
 
+  const healthServer = process.env.PORT ? startHealthServer(process.env.PORT) : null;
+
   const shutdown = async signal => {
     console.log(`[worker] ${signal} received, draining`);
+    healthServer?.close();
     await boss.stop({ graceful: true });
     await pool.end();
     process.exit(0);

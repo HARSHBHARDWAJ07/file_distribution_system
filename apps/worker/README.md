@@ -31,5 +31,21 @@ cross-region replication rule instead of application code.
 npm run dev:worker
 ```
 
-It needs the same `DATABASE_URL` and `STORAGE_*` env vars as file-service. On Render, deploy it as a
-**Background Worker** (root `apps/worker`, start `node index.js`), not a Web Service. It has no public URL.
+It needs the same `DATABASE_URL` and `STORAGE_*` env vars as file-service.
+
+## Deploying (Render free tier)
+
+Render's free tier has no Background Worker type, so the worker runs as a **free Docker Web Service**
+(`apps/worker/Dockerfile`). When `PORT` is set it serves a read-only `GET /health` (job counters, no file data);
+locally there is no `PORT` and no HTTP at all.
+
+- **Create it once** from a terminal: `node scripts/render/createWorker.js`. It copies `DATABASE_URL` and
+  `STORAGE_*` from the file-service through the Render API. The API key is read from `RENDER_API_KEY` or `~/.render/api_key`.
+- **Deploys** run in `.github/workflows/deploy-worker.yml`: on a push to `main` that touches the worker, the
+  worker tests run first, then that exact commit is deployed. Auto-deploy is off on Render, so this
+  workflow is the only way code reaches the worker. It needs the secrets `RENDER_API_KEY` and
+  `RENDER_WORKER_SERVICE_ID` and the variable `WORKER_HEALTH_URL`.
+- **Keep-alive**: free Web Services sleep after ~15 idle minutes, and a sleeping worker drains no queue.
+  `.github/workflows/worker-keepalive.yml` pings `/health` every 10 minutes. That uses almost all of the
+  workspace's 750 free instance hours a month, which the other free services share. A paid Background
+  Worker (no port, no pings) is the proper fix when there's budget.

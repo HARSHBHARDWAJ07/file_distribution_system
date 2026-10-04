@@ -1,0 +1,46 @@
+name: Deploy worker
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/worker/**
+      - packages/queue/**
+      - package-lock.json
+      - scripts/render/**
+      - .github/workflows/deploy-worker.yml
+  workflow_dispatch:
+
+# Never run two deploys of the worker at once; a newer push supersedes.
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test --workspace=apps/worker
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The Render service has autoDeploy off, so this is the only path to production:
+      # a deploy of exactly the commit whose tests just passed.
+      - run: node scripts/render/deploy.js "$GITHUB_SHA"
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_WORKER_SERVICE_ID: ${{ secrets.RENDER_WORKER_SERVICE_ID }}
+      - name: Health check
+        run: curl -fsS --retry 5 --retry-delay 10 --retry-all-errors --max-time 90 "${{ vars.WORKER_HEALTH_URL }}"
