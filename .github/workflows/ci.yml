@@ -13,6 +13,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      # Catches SSR and import mistakes the web unit tests can't.
+      - run: npm run build --workspace=apps/web
 
   # The SQL the unit tests can only fake (atomic claim, ownership in WHERE,
   # CHECK constraints, pg-boss singletonKey), against a real throwaway Postgres.
