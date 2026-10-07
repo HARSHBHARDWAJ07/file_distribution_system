@@ -39,6 +39,12 @@ services:
     environment:
       - SERVICES=s3
       - DEFAULT_REGION=us-east-1
+      # LocalStack 3.0's default S3 provider breaks a multipart upload once a
+      # part PUT is cut off mid-transfer: the re-sent part comes back with
+      # ETag "None" and the upload can never complete. Real S3 and R2 handle
+      # it (verified against R2), and so does the older 'v2' provider - which
+      # is what the UI's offline/reload/resume paths need to work locally.
+      - PROVIDER_OVERRIDE_S3=v2
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health"]
       interval: 2s
@@ -53,10 +59,11 @@ services:
     entrypoint: /bin/sh
     # Same CORS rule production's R2 bucket needs: browsers PUT parts straight
     # to storage and must be allowed to read each part's ETag header.
-    command: >
-      -c "aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3 mb s3://cloudstore &&
-          aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3api put-bucket-cors
-          --bucket cloudstore --cors-configuration file:///infra/storage-cors.json"
+    command:
+      - -c
+      - >-
+        aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3 mb s3://cloudstore &&
+        aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3api put-bucket-cors --bucket cloudstore --cors-configuration file:///infra/storage-cors.json
     volumes:
       - ./infra:/infra:ro
     environment:

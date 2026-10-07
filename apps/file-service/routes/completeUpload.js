@@ -53,7 +53,11 @@ async function finalizeInStorage(file, parts) {
       return;
     }
     if (err.name === 'InvalidPart' || err.name === 'InvalidPartOrder') {
-      throw new AppError(400, 'INVALID_PARTS', 'one or more part ETags do not match what was uploaded');
+      // The recorded receipts are wrong. Keeping them would make every resume
+      // skip those parts and fail here again, forever; forgetting them makes
+      // the next resume upload every part fresh.
+      await pool.query('DELETE FROM upload_parts WHERE file_id = $1', [file.id]);
+      throw new AppError(400, 'INVALID_PARTS', "Storage didn't recognise some uploaded parts. Retry to send them again.");
     }
     throw Object.assign(new AppError(502, 'STORAGE_ERROR', 'storage could not finalize; retry shortly'), { cause: err });
   }

@@ -67,11 +67,12 @@ function fakeDb() {
       parts.get(p[0]).set(p[1], p[2]);
       return { rowCount: 1 };
     }
-    if (sql.includes('FROM upload_parts')) {
+    if (sql.startsWith('SELECT part_number')) {
       const m = parts.get(p[0]) || new Map();
       return { rows: [...m].sort((a, b) => a[0] - b[0]).map(([part_number, etag]) => ({ part_number, etag })) };
     }
     if (sql.startsWith('DELETE FROM files')) { files.delete(p[0]); return { rowCount: 1 }; }
+    if (sql.startsWith('DELETE FROM upload_parts')) { parts.delete(p[0]); return { rowCount: 1 }; }
     throw new Error(`fakeDb: unhandled query ${sql}`);
   });
   return { files };
@@ -287,13 +288,16 @@ describe('completing a chunked upload', () => {
     expect((await complete(fileId)).body.data.status).toBe('complete');
   });
 
-  it('maps storage rejecting the ETags to a 400', async () => {
+  it('bad ETags: 400, and the recorded parts are forgotten so a resume re-sends them instead of looping', async () => {
     const fileId = await initChunked();
     await recordParts(fileId, [1, 2, 3]);
     storage.completeMultipartUpload.mockRejectedValueOnce(Object.assign(new Error('bad'), { name: 'InvalidPart' }));
     const res = await complete(fileId);
     expect(res.body.error.code).toBe('INVALID_PARTS');
     expect(db.files.get(fileId).status).toBe('uploading');
+    const status = await as(ALICE, request(app).get(`/uploads/${fileId}/status`));
+    expect(status.body.data.uploadedParts).toEqual([]);
+    expect(status.body.data.remainingPartNumbers).toEqual([1, 2, 3]);
   });
 
   it('stops handing out part URLs once the upload is complete', async () => {
