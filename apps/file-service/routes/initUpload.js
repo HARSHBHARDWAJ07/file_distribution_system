@@ -23,7 +23,9 @@ async function initUpload(req, res) {
   try {
     if (!chunked) {
       const uploadUrl = await storage.getPresignedUploadUrl(storageKey, contentType);
-      return res.status(201).json(ok({ fileId, strategy: 'single', uploadUrl }));
+      // The URL signs this Content-Type; the browser's PUT must send exactly
+      // it or storage rejects the signature with a 403.
+      return res.status(201).json(ok({ fileId, strategy: 'single', uploadUrl, contentType: contentType ?? null }));
     }
     const uploadId = await storage.createMultipartUpload(storageKey, contentType);
     await pool.query('UPDATE files SET upload_id = $1 WHERE id = $2', [uploadId, fileId]);

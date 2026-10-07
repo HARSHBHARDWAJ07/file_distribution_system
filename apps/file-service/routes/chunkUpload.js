@@ -1,7 +1,7 @@
 const { pool } = require('../lib/db');
 const storage = require('../lib/storage');
 const { loadOwnedFile } = require('../lib/files');
-const { calculatePartCount, remainingParts } = require('../lib/chunking');
+const { calculatePartCount, remainingParts, CHUNK_SIZE_BYTES } = require('../lib/chunking');
 const { validatePartNumber, validateRecordPart } = require('@cloudstore/validation');
 const { AppError } = require('@cloudstore/http-utils');
 const { ok } = require('@cloudstore/shared-types');
@@ -46,17 +46,33 @@ async function getRecordedParts(fileId) {
   return rows;
 }
 
+// Everything a client needs to resume: which parts storage already holds
+// (with the ETags the final complete call must send), and for a single-PUT
+// upload that never finished, a fresh URL to retry it.
 async function getUploadStatus(req, res) {
   const file = await loadOwnedFile(req.params.fileId, req.userId);
-  const uploadedPartNumbers = (await getRecordedParts(file.id)).map(r => r.part_number);
-  const totalParts = calculatePartCount(file.size_bytes);
+  const chunked = Boolean(file.upload_id);
+  const recorded = chunked ? await getRecordedParts(file.id) : [];
+  const uploadedPartNumbers = recorded.map(r => r.part_number);
+  const totalParts = chunked ? calculatePartCount(file.size_bytes) : 1;
 
-  return res.json(ok({
+  const body = {
+    fileId: file.id,
+    filename: file.filename,
+    sizeBytes: Number(file.size_bytes),
+    contentType: file.content_type,
     status: file.status,
+    strategy: chunked ? 'chunked' : 'single',
+    chunkSizeBytes: chunked ? CHUNK_SIZE_BYTES : Number(file.size_bytes),
     totalParts,
+    uploadedParts: recorded.map(r => ({ partNumber: r.part_number, etag: r.etag })),
     uploadedPartNumbers,
-    remainingPartNumbers: remainingParts(totalParts, uploadedPartNumbers),
-  }));
+    remainingPartNumbers: chunked ? remainingParts(totalParts, uploadedPartNumbers) : [],
+  };
+  if (!chunked && file.status === 'uploading') {
+    body.uploadUrl = await storage.getPresignedUploadUrl(file.storage_key, file.content_type || undefined);
+  }
+  return res.json(ok(body));
 }
 
 // Client gives up on an upload: free the stored parts and close the row.

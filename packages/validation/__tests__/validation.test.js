@@ -1,5 +1,5 @@
 const {
-  MAX_UPLOAD_BYTES, validateUuid, validatePartNumber, validateSignup, validateLogin, validateRefresh,
+  MAX_UPLOAD_BYTES, validateUuid, validatePartNumber, validateSignup, validateLogin, validateRefresh, validateListQuery,
   validateInitUpload, validateCompleteParts,
 } = require('..');
 
@@ -103,4 +103,27 @@ describe('validateCompleteParts (the failed-merge guard)', () => {
   it('returns the parts sorted, with extra fields stripped', () => {
     expect(validateCompleteParts([{ ...part(2), Size: 5 }, part(1)], 2)).toEqual([part(1), part(2)]);
   });
+});
+
+describe('validateListQuery', () => {
+  const { encodeCursor } = require('..');
+
+  it('defaults the page size and caps it at 100', () => {
+    expect(validateListQuery({})).toEqual({ limit: 20, cursor: null });
+    expect(validateListQuery({ limit: '100' }).limit).toBe(100);
+  });
+
+  it.each(['0', '101', 'abc', '2.5'])('rejects limit %p', limit => rejects(() => validateListQuery({ limit })));
+
+  it('round-trips an opaque cursor', () => {
+    const cursor = encodeCursor('2026-10-07 06:00:00.123456+00', UUID);
+    expect(validateListQuery({ cursor }).cursor).toEqual({ createdAt: '2026-10-07 06:00:00.123456+00', id: UUID });
+  });
+
+  it.each([
+    ['garbage', 'not-base64-json'],
+    ['a forged id', Buffer.from(JSON.stringify(['2026-01-01', "1' OR 1=1"])).toString('base64url')],
+    ['a bad timestamp', Buffer.from(JSON.stringify(['yesterday-ish', UUID])).toString('base64url')],
+    ['characters outside base64url', 'abc$def'],
+  ])('rejects a cursor that is %s', (_, cursor) => rejects(() => validateListQuery({ cursor })));
 });

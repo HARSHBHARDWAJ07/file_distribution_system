@@ -95,6 +95,36 @@ const validateInitUpload = body => parse(initUploadSchema, body);
 const validateRecordPart = body => parse(recordPartSchema, body);
 const validateCompleteBody = body => parse(completeSchema, body ?? {});
 
+// ---------- listing ----------
+
+// Keyset pagination: the cursor is opaque to clients (base64url of the last
+// row's exact created_at text + id). Keyset rather than OFFSET, so page 50 is
+// as fast as page 1 and rows don't shift while new uploads land.
+function encodeCursor(createdAtText, id) {
+  return Buffer.from(JSON.stringify([createdAtText, id])).toString('base64url');
+}
+
+function decodeCursor(cursor) {
+  try {
+    const [createdAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt))) throw new Error('bad time');
+    return { createdAt, id: validateUuid(id, 'cursor') };
+  } catch {
+    throw new AppError(400, 'INVALID_INPUT', 'cursor is malformed');
+  }
+}
+
+const listQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/, 'is malformed').optional(),
+});
+
+// Returns { limit, cursor } with cursor decoded to { createdAt, id } or null.
+function validateListQuery(query) {
+  const { limit, cursor } = parse(listQuerySchema, query ?? {});
+  return { limit, cursor: cursor ? decodeCursor(cursor) : null };
+}
+
 // The failed-merge guard: a part list that can't assemble the whole file is
 // rejected here, naming exactly which parts are wrong, instead of surfacing
 // as an opaque storage error. Returns the parts sorted and normalized.
@@ -128,4 +158,6 @@ module.exports = {
   validateRecordPart,
   validateCompleteBody,
   validateCompleteParts,
+  validateListQuery,
+  encodeCursor,
 };

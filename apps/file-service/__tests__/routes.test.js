@@ -304,6 +304,36 @@ describe('completing a chunked upload', () => {
   });
 });
 
+describe('what the UI needs for upload and resume', () => {
+  it('init returns the content type the presigned single PUT was signed with', async () => {
+    const res = await init({ filename: 'cat.png', sizeBytes: 1000, contentType: 'IMAGE/PNG' });
+    expect(res.body.data).toMatchObject({ strategy: 'single', contentType: 'image/png' });
+    expect(storage.getPresignedUploadUrl).toHaveBeenCalledWith(expect.any(String), 'image/png');
+  });
+
+  it('status lists stored parts with their ETags, so a resumed upload can complete', async () => {
+    const fileId = await initChunked();
+    await recordParts(fileId, [3, 1]);
+    const res = await as(ALICE, request(app).get(`/uploads/${fileId}/status`));
+    expect(res.body.data).toMatchObject({
+      strategy: 'chunked',
+      chunkSizeBytes: CHUNK_SIZE_BYTES,
+      totalParts: 3,
+      uploadedParts: [{ partNumber: 1, etag: '"etag-1"' }, { partNumber: 3, etag: '"etag-3"' }],
+      remainingPartNumbers: [2],
+    });
+    expect(res.body.data.uploadUrl).toBeUndefined();
+  });
+
+  it('status hands an unfinished single-PUT upload a fresh URL to retry with', async () => {
+    const fileId = await initSingle();
+    storage.getPresignedUploadUrl.mockClear();
+    const res = await as(ALICE, request(app).get(`/uploads/${fileId}/status`));
+    expect(res.body.data).toMatchObject({ strategy: 'single', totalParts: 1, uploadUrl: 'https://storage.test/put', contentType: 'image/png' });
+    expect(storage.getPresignedUploadUrl).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('abort and delete', () => {
   it('abort frees the stored parts and closes the upload', async () => {
     const fileId = await initChunked();

@@ -75,6 +75,27 @@ describe('identity forwarded to the file-service', () => {
   });
 });
 
+describe('GET /api/files (dashboard list)', () => {
+  it('forwards only the validated limit and cursor, never the raw query string', async () => {
+    const { encodeCursor } = require('@cloudstore/validation');
+    const cursor = encodeCursor('2026-10-07 06:00:00+00', FILE_ID);
+    await authed(request(app).get(`/api/files?limit=5&cursor=${cursor}&owner=victim&debug=1`));
+    expect(seen.path).toBe(`/files?limit=5&cursor=${cursor}`);
+    expect(seen.headers['x-user-id']).toBe(USER_ID);
+  });
+
+  it('applies the default page size', async () => {
+    await authed(request(app).get('/api/files'));
+    expect(seen.path).toBe('/files?limit=20');
+  });
+
+  it.each(['limit=0', 'limit=500', 'limit=abc', 'cursor=%27%20OR%201%3D1'])('rejects %s with 400 before any network call', async q => {
+    const res = await authed(request(app).get(`/api/files?${q}`));
+    expect(res.status).toBe(400);
+    expect(seen).toBeNull();
+  });
+});
+
 describe('path params are validated before any network call', () => {
   it.each([
     ['a non-UUID file id', '/api/files/not-a-uuid/download'],

@@ -12,6 +12,7 @@ services:
       - ./apps/file-service/db/schema.sql:/docker-entrypoint-initdb.d/02-file-schema.sql
       - ./apps/file-service/db/migration_phase3.sql:/docker-entrypoint-initdb.d/03-file-phase3.sql
       - ./apps/file-service/db/migration_phase4.sql:/docker-entrypoint-initdb.d/04-file-phase4.sql
+      - ./apps/file-service/db/migration_phase5.sql:/docker-entrypoint-initdb.d/05-file-phase5.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cloudstore"]
       interval: 2s
@@ -50,8 +51,14 @@ services:
       s3-mock:
         condition: service_healthy
     entrypoint: /bin/sh
+    # Same CORS rule production's R2 bucket needs: browsers PUT parts straight
+    # to storage and must be allowed to read each part's ETag header.
     command: >
-      -c "aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3 mb s3://cloudstore"
+      -c "aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3 mb s3://cloudstore &&
+          aws --endpoint-url=http://s3-mock:4566 --region us-east-1 s3api put-bucket-cors
+          --bucket cloudstore --cors-configuration file:///infra/storage-cors.json"
+    volumes:
+      - ./infra:/infra:ro
     environment:
       - AWS_ACCESS_KEY_ID=localkey
       - AWS_SECRET_ACCESS_KEY=localsecret

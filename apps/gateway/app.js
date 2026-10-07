@@ -4,7 +4,7 @@ const { ok, INTERNAL_TOKEN_HEADER } = require('@cloudstore/shared-types');
 const {
   AppError, requestId, requestLogger, notFound, errorHandler, REQUEST_ID_HEADER,
 } = require('@cloudstore/http-utils');
-const { validateUuid, validatePartNumber } = require('@cloudstore/validation');
+const { validateUuid, validatePartNumber, validateListQuery } = require('@cloudstore/validation');
 const { requireAuth } = require('./middleware/requireAuth');
 const { rateLimit, memoryStore } = require('./lib/rateLimit');
 
@@ -97,7 +97,7 @@ function createApp({
     relay(req, res, {
       serviceName: 'file-service',
       baseUrl: fileServiceUrl,
-      path: pathFor(req.params),
+      path: pathFor(req.params, req),
       headers: { 'x-user-id': req.user.id, [INTERNAL_TOKEN_HEADER]: internalToken },
     }));
 
@@ -124,6 +124,18 @@ function createApp({
     res.json(ok({ user: req.user }));
   });
 
+  // Validated here so junk never travels; only the two known params are
+  // rebuilt into the upstream query, never the client's raw query string.
+  const checkListQuery = (req, res, next) => {
+    try {
+      const { limit } = validateListQuery(req.query);
+      const q = new URLSearchParams({ limit: String(limit) });
+      if (req.query.cursor) q.set('cursor', req.query.cursor); // validated as base64url above
+      req.upstreamQuery = q.toString();
+      next();
+    } catch (err) { next(err); }
+  };
+  app.get('/api/files', user, checkListQuery, toFiles((p, req) => `/files?${req.upstreamQuery}`));
   app.post('/api/files/uploads/init', user, toFiles(() => '/uploads/init'));
   app.get('/api/files/uploads/:fileId/status', user, checkFileId, toFiles(p => `/uploads/${p.fileId}/status`));
   app.get('/api/files/uploads/:fileId/parts/:partNumber', user, checkFileId, checkPart,

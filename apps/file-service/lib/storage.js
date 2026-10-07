@@ -83,6 +83,13 @@ async function getPresignedDownloadUrl(key, filename) {
 
 // S3 DeleteObject succeeds for a key that doesn't exist, so deleting
 // "every object a file might own" is safe even if some were never made.
+// The worker's thumbnails are JPEGs we generated ourselves, so they're safe to
+// display inline in an <img> (unlike user uploads, which force attachment).
+async function getPresignedThumbnailUrl(key) {
+  const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+  return getSignedUrl(presignClient, command, { expiresIn: PRESIGN_EXPIRY_SECONDS });
+}
+
 async function deleteObject(key, bucket = BUCKET) {
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
@@ -142,6 +149,7 @@ module.exports = {
   PRESIGN_EXPIRY_SECONDS,
   getPresignedUploadUrl,
   getPresignedDownloadUrl,
+  getPresignedThumbnailUrl,
   deleteObject,
   getObjectSize,
   createMultipartUpload,

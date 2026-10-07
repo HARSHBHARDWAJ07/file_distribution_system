@@ -6,6 +6,7 @@ const { initUpload } = require('./routes/initUpload');
 const { completeUpload } = require('./routes/completeUpload');
 const { getPartUploadUrl, recordPartUploaded, getUploadStatus, abortUpload } = require('./routes/chunkUpload');
 const { downloadFile, deleteFile } = require('./routes/fileAccess');
+const { listFiles } = require('./routes/listFiles');
 
 // Built separately from listen() so tests can drive it with supertest.
 function createApp({ logger, internalToken }) {
@@ -32,6 +33,7 @@ function createApp({ logger, internalToken }) {
   app.post('/uploads/:fileId/complete', asyncHandler(completeUpload));
   app.post('/uploads/:fileId/abort', asyncHandler(abortUpload));
 
+  app.get('/files', asyncHandler(listFiles));
   app.get('/files/:fileId/download', asyncHandler(downloadFile));
   app.delete('/files/:fileId', asyncHandler(deleteFile));
 

@@ -24,6 +24,7 @@ jest.mock('../lib/storage', () => ({
   completeMultipartUpload: jest.fn(async () => {}),
   getObjectSize: jest.fn(),
   getPresignedDownloadUrl: jest.fn(async () => 'https://storage.test/get'),
+  getPresignedThumbnailUrl: jest.fn(async () => 'https://storage.test/thumb'),
 }));
 jest.mock('@cloudstore/queue', () => ({ enqueueFileUploaded: jest.fn(async () => 'job-1') }));
 
@@ -48,7 +49,7 @@ describeDb('file-service against real Postgres', () => {
     const { createApp } = require('../app');
 
     await pool.query(`CREATE SCHEMA ${SCHEMA}`);
-    for (const file of ['schema.sql', 'migration_phase3.sql', 'migration_phase4.sql']) await pool.query(sql(file));
+    for (const file of ['schema.sql', 'migration_phase3.sql', 'migration_phase4.sql', 'migration_phase5.sql']) await pool.query(sql(file));
     app = createApp({ logger: createLogger('it'), internalToken: TOKEN });
   });
 
@@ -112,6 +113,48 @@ describeDb('file-service against real Postgres', () => {
       .rejects.toMatchObject({ code: '23514' });
     await expect(pool.query(`UPDATE files SET size_bytes = 0 WHERE id = $1`, [fileId]))
       .rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('keyset pagination walks every file exactly once, newest first, even with identical timestamps', async () => {
+    const owner = '44444444-4444-4444-8444-444444444444';
+    // 25 rows inserted in one statement share the same now(): ties on
+    // created_at must be broken by id, or rows get skipped or repeated.
+    await pool.query(
+      `INSERT INTO files (owner_id, filename, size_bytes, storage_key, status)
+       SELECT $1, 'f' || g, 10, 'users/p/' || gen_random_uuid(), 'complete' FROM generate_series(1, 25) g`, [owner]);
+    await pool.query(
+      `INSERT INTO files (owner_id, filename, size_bytes, storage_key, status)
+       VALUES ($1, 'aborted', 10, 'users/p/' || gen_random_uuid(), 'failed')`, [owner]);
+    const { rows: [{ id: alices }] } = await pool.query(
+      `SELECT id FROM files WHERE owner_id = $1 LIMIT 1`, [ALICE]);
+
+    const seen = [];
+    let cursor = null;
+    let pages = 0;
+    do {
+      const res = await as(owner, request(app).get(`/files?limit=10${cursor ? `&cursor=${cursor}` : ''}`));
+      expect(res.status).toBe(200);
+      seen.push(...res.body.data.items);
+      cursor = res.body.data.nextCursor;
+      pages++;
+    } while (cursor && pages < 10);
+
+    expect(pages).toBe(3);
+    expect(new Set(seen.map(f => f.id)).size).toBe(25);
+    expect(seen.some(f => f.filename === 'aborted')).toBe(false); // aborted uploads hidden
+    expect(seen.some(f => f.id === alices)).toBe(false);          // only the caller's files
+    const order = seen.map(f => [f.createdAt, f.id]);
+    expect(order).toEqual([...order].sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? 1 : -1) : a[0] < b[0] ? 1 : -1)));
+  });
+
+  it('the dashboard query is served by the keyset index', async () => {
+    await pool.query('ANALYZE files');
+    await pool.query('SET enable_seqscan = off'); // tiny table: force the planner to show its index choice
+    const { rows } = await pool.query(
+      `EXPLAIN SELECT id FROM files WHERE owner_id = $1 AND status <> 'failed'
+         AND (created_at, id) < (now(), gen_random_uuid()) ORDER BY created_at DESC, id DESC LIMIT 21`, [ALICE]);
+    await pool.query('RESET enable_seqscan');
+    expect(rows.map(r => r['QUERY PLAN']).join('\n')).toMatch(/idx_files_owner_created/);
   });
 
   it('the reconciliation index exists for the worker sweep', async () => {
