@@ -1,28 +1,23 @@
-// Background worker: consumes file.uploaded jobs. Its real work only touches
-// Postgres (queue + metadata) and object storage - no HTTP API. The one
-// exception is a read-only /health endpoint, started only when PORT is set:
-// Render's free tier has no Background Worker type, so in production this
-// runs as a free Web Service that needs a port to bind and something to ping.
-const http = require('http');
+// Background worker: consumes file.uploaded jobs. Deliberately never opens an
+// HTTP port - it only talks to Postgres (queue + metadata) and object storage.
+//
+// Two modes, same job handler:
+//   node index.js          long-running consumer (local dev / docker-compose)
+//   node index.js --drain  process everything queued, then exit. Production
+//                          runs this on a GitHub Actions schedule, since no
+//                          free host keeps a long-running worker alive.
 const { getBoss, QUEUES } = require('@cloudstore/queue');
 const { pool } = require('./lib/db');
 const { planWork } = require('./lib/workPlan');
 const { generateThumbnail } = require('./jobs/generateThumbnail');
 const { replicateFile } = require('./jobs/replicate');
 
-const stats = { startedAt: new Date().toISOString(), jobsSucceeded: 0, jobsFailed: 0, lastJobAt: null };
-
-function startHealthServer(port) {
-  const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: true, data: { status: 'worker healthy', queue: QUEUES.FILE_UPLOADED, ...stats } }));
-    }
-    res.writeHead(404).end();
-  });
-  server.listen(port, () => console.log(`[worker] health endpoint on port ${port}`));
-  return server;
-}
+// Caps parallel jobs: runner/dyno compute is small, and a burst of
+// concurrent sharp resizes is an easy way to get OOM-killed.
+const CONCURRENCY = 2;
+// A drain run stops picking up new jobs after this long, so a flood of
+// uploads can't keep one Actions run alive forever; the next run continues.
+const DRAIN_MAX_SECONDS = Number(process.env.DRAIN_MAX_SECONDS) || 8 * 60;
 
 async function handleFileUploaded(job) {
   const { fileId } = job.data;
@@ -56,19 +51,12 @@ async function handleFileUploaded(job) {
   }
 }
 
-async function main() {
-  const boss = await getBoss();
-
-  // localConcurrency caps parallel jobs: free-tier compute is small, and a
-  // burst of concurrent sharp resizes is an easy way to get OOM-killed.
-  await boss.work(QUEUES.FILE_UPLOADED, { localConcurrency: 2 }, async jobs => {
+async function consume(boss) {
+  await boss.work(QUEUES.FILE_UPLOADED, { localConcurrency: CONCURRENCY }, async jobs => {
     for (const job of jobs) {
-      stats.lastJobAt = new Date().toISOString();
       try {
         await handleFileUploaded(job);
-        stats.jobsSucceeded++;
       } catch (err) {
-        stats.jobsFailed++;
         console.error(`[worker] job ${job.id} failed, will retry`, err);
         throw err; // rethrow so pg-boss applies its retry/backoff policy
       }
@@ -76,11 +64,8 @@ async function main() {
   });
   console.log(`[worker] consuming ${QUEUES.FILE_UPLOADED}`);
 
-  const healthServer = process.env.PORT ? startHealthServer(process.env.PORT) : null;
-
   const shutdown = async signal => {
     console.log(`[worker] ${signal} received, draining`);
-    healthServer?.close();
     await boss.stop({ graceful: true });
     await pool.end();
     process.exit(0);
@@ -89,7 +74,52 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+// fetch/complete/fail by hand instead of work(): work() polls forever,
+// while a drain run must notice the queue is empty and exit.
+async function drain(boss) {
+  const deadline = Date.now() + DRAIN_MAX_SECONDS * 1000;
+  let succeeded = 0;
+  let failed = 0;
+
+  while (Date.now() < deadline) {
+    const jobs = await boss.fetch(QUEUES.FILE_UPLOADED, { batchSize: CONCURRENCY });
+    if (jobs.length === 0) break;
+
+    await Promise.all(jobs.map(async job => {
+      try {
+        await handleFileUploaded(job);
+        await boss.complete(QUEUES.FILE_UPLOADED, job.id);
+        succeeded++;
+      } catch (err) {
+        console.error(`[worker] job ${job.id} failed, will retry`, err);
+        // fail() hands the job back to pg-boss's retry/backoff policy; a
+        // retry scheduled for later is picked up by a future drain run.
+        await boss.fail(QUEUES.FILE_UPLOADED, job.id, { message: err.message });
+        failed++;
+      }
+    }));
+  }
+
+  const timedOut = Date.now() >= deadline;
+  console.log(`[worker] drain done: ${succeeded} succeeded, ${failed} failed${timedOut ? ', stopped at time limit' : ', queue empty'}`);
+  if (failed && process.env.GITHUB_ACTIONS) {
+    console.log(`::warning::${failed} job(s) failed and were handed back to pg-boss for retry`);
+  }
+}
+
+async function main() {
+  const boss = await getBoss();
+  if (!process.argv.includes('--drain')) return consume(boss);
+
+  try {
+    await drain(boss);
+  } finally {
+    await boss.stop({ graceful: true });
+    await pool.end();
+  }
+}
+
 main().catch(err => {
-  console.error('[worker] failed to start', err);
+  console.error('[worker] fatal', err);
   process.exit(1);
 });

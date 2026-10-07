@@ -1,0 +1,39 @@
+name: Worker
+# Production home of apps/worker. No free host keeps a long-running worker
+# alive, so instead this runs it in --drain mode on a schedule: start, process
+# every queued file.uploaded job, exit. Free because the repo is public.
+#
+# Trade-off: a thumbnail appears within roughly one schedule interval of the
+# upload rather than within seconds, and GitHub can delay scheduled runs
+# under load. The client never waits either way - that was the point of the queue.
+on:
+  schedule:
+    - cron: '*/5 * * * *' # GitHub's minimum interval
+  workflow_dispatch:      # run now: gh workflow run worker.yml
+
+# One drain at a time; a queued run waits instead of racing the current one
+# (pg-boss would keep them from taking the same job anyway, so this just saves minutes).
+concurrency:
+  group: worker-drain
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12 # drain stops taking jobs at 8 min; leave room to finish
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --workspace=apps/worker
+      - run: node apps/worker/index.js --drain
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STORAGE_ENDPOINT: ${{ secrets.STORAGE_ENDPOINT }}
+          STORAGE_REGION: ${{ secrets.STORAGE_REGION }}
+          STORAGE_BUCKET: ${{ secrets.STORAGE_BUCKET }}
+          STORAGE_ACCESS_KEY_ID: ${{ secrets.STORAGE_ACCESS_KEY_ID }}
+          STORAGE_SECRET_ACCESS_KEY: ${{ secrets.STORAGE_SECRET_ACCESS_KEY }}
+          STORAGE_REPLICA_BUCKET: ${{ secrets.STORAGE_REPLICA_BUCKET }}
