@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json ./
 COPY apps/auth-service/package.json apps/auth-service/package.json
 COPY packages/shared-types packages/shared-types
+COPY packages/logger packages/logger
 RUN npm install --workspace=apps/auth-service --omit=dev
 
 COPY apps/auth-service apps/auth-service

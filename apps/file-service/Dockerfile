@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json ./
 COPY apps/file-service/package.json apps/file-service/package.json
 COPY packages/shared-types packages/shared-types
+COPY packages/logger packages/logger
 COPY packages/queue packages/queue
 RUN npm install --workspace=apps/file-service --omit=dev
 

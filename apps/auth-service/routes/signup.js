@@ -1,28 +1,26 @@
 const bcrypt = require('bcrypt');
 const { pool } = require('../lib/db');
-const { ok, fail } = require('@cloudstore/shared-types');
+const { signupBody } = require('../lib/schemas');
+const { ok, fail, validate } = require('@cloudstore/shared-types');
 
 const SALT_ROUNDS = 12;
 
 async function signup(req, res) {
-  const { email, password } = req.body;
-  if (!email || !password || password.length < 8) {
-    return res.status(400).json(fail('INVALID_INPUT', 'email and a password of 8+ characters are required'));
-  }
+  const { data: body, error } = validate(signupBody, req.body);
+  if (error) return res.status(400).json(error);
 
+  const passwordHash = await bcrypt.hash(body.password, SALT_ROUNDS);
   try {
-    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const result = await pool.query(
       'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
-      [email.toLowerCase(), passwordHash]
+      [body.email, passwordHash]
     );
     return res.status(201).json(ok({ user: result.rows[0] }));
   } catch (err) {
     if (err.code === '23505') { // unique_violation
       return res.status(409).json(fail('EMAIL_TAKEN', 'an account with this email already exists'));
     }
-    console.error(err);
-    return res.status(500).json(fail('SIGNUP_FAILED', 'could not create account'));
+    throw err; // the error handler logs it and returns a 500 envelope
   }
 }
 

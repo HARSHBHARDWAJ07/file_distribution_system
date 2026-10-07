@@ -2,6 +2,7 @@ const {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   DeleteObjectCommand,
   CreateMultipartUploadCommand,
   UploadPartCommand,
@@ -62,8 +63,21 @@ async function getPresignedDownloadUrl(key) {
   return getSignedUrl(presignClient, command, { expiresIn: PRESIGN_EXPIRY_SECONDS });
 }
 
-async function deleteObject(key) {
-  await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+// S3 DeleteObject succeeds for a key that doesn't exist, so deleting
+// "every object a file might own" is safe even if some were never made.
+async function deleteObject(key, bucket = BUCKET) {
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+}
+
+// Size of a stored object, or null if it isn't there.
+async function getObjectSize(key) {
+  try {
+    const head = await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+    return head.ContentLength;
+  } catch (err) {
+    if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) return null;
+    throw err;
+  }
 }
 
 async function createMultipartUpload(key, contentType) {
@@ -94,8 +108,14 @@ async function completeMultipartUpload(key, uploadId, parts) {
   }));
 }
 
+// Frees the parts an unfinished multipart upload has stored. Already-gone
+// (completed or aborted) is the outcome we wanted, so it isn't an error.
 async function abortMultipartUpload(key, uploadId) {
-  await s3.send(new AbortMultipartUploadCommand({ Bucket: BUCKET, Key: key, UploadId: uploadId }));
+  try {
+    await s3.send(new AbortMultipartUploadCommand({ Bucket: BUCKET, Key: key, UploadId: uploadId }));
+  } catch (err) {
+    if (err.name !== 'NoSuchUpload') throw err;
+  }
 }
 
 module.exports = {
@@ -103,6 +123,7 @@ module.exports = {
   getPresignedUploadUrl,
   getPresignedDownloadUrl,
   deleteObject,
+  getObjectSize,
   createMultipartUpload,
   getPresignedPartUploadUrl,
   completeMultipartUpload,

@@ -11,6 +11,7 @@ services:
       - ./apps/auth-service/db/schema.sql:/docker-entrypoint-initdb.d/01-auth-schema.sql
       - ./apps/file-service/db/schema.sql:/docker-entrypoint-initdb.d/02-file-schema.sql
       - ./apps/file-service/db/migration_phase3.sql:/docker-entrypoint-initdb.d/03-file-phase3.sql
+      - ./apps/file-service/db/migration_phase4.sql:/docker-entrypoint-initdb.d/04-file-phase4.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cloudstore"]
       interval: 2s
@@ -87,6 +88,7 @@ services:
       - STORAGE_ACCESS_KEY_ID=localkey
       - STORAGE_SECRET_ACCESS_KEY=localsecret
       - STORAGE_PUBLIC_ENDPOINT=http://localhost:4566
+      - INTERNAL_API_TOKEN=local-dev-internal-token-change-me
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,6 +124,7 @@ services:
       - AUTH_SERVICE_URL=http://auth-service:4001
       - FILE_SERVICE_URL=http://file-service:4002
       - JWT_SECRET=local-dev-secret-change-me
+      - INTERNAL_API_TOKEN=local-dev-internal-token-change-me
     depends_on:
       - auth-service
       - file-service

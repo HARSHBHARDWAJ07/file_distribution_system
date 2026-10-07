@@ -1,37 +1,17 @@
-const express = require('express');
-const { ok, fail } = require('@cloudstore/shared-types');
-const { asyncHandler } = require('./lib/asyncHandler');
-const { signup } = require('./routes/signup');
-const { login } = require('./routes/login');
-const { refresh } = require('./routes/refresh');
+const { createLogger } = require('@cloudstore/logger');
+const { createApp } = require('./app');
 
-const app = express();
+const logger = createLogger('auth-service');
 const PORT = process.env.PORT || 4001;
 
-app.use(express.json());
+// Without it every token would be signed with "undefined" - fail at boot instead.
+if (!process.env.JWT_SECRET) {
+  logger.fatal('JWT_SECRET must be set');
+  process.exit(1);
+}
 
-app.get('/ping', (req, res) => {
-  res.json(ok({
-    service: 'auth-service',
-    message: 'pong from auth-service',
-    timestamp: Date.now()
-  }));
-});
-
-app.get('/health', (req, res) => {
-  res.json(ok({ status: 'healthy' }));
-});
-
-app.post('/signup', asyncHandler(signup));
-app.post('/login', asyncHandler(login));
-app.post('/refresh', asyncHandler(refresh));
-
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-  console.error('[auth-service] unhandled route error:', err);
-  res.status(500).json(fail('INTERNAL_ERROR', 'an unexpected error occurred'));
-});
+const app = createApp({ logger });
 
 app.listen(PORT, () => {
-  console.log(`[auth-service] listening on port ${PORT}`);
+  logger.info({ port: PORT }, 'auth-service listening');
 });

@@ -1,17 +1,13 @@
 /**
- * Shared contracts between services.
- * Phase 0: just enough shape to prove both services agree on a
- * response format. Phase 1 extends User with real fields.
+ * Shared contracts between services: the response envelope every service
+ * returns, plus the HTTP helpers that keep errors inside that envelope.
  */
+const { ok, fail } = require('./envelope');
+const { validate, errorHandler } = require('./http');
+const storageKeys = require('./storageKeys');
 
-/** Standard success envelope every service should return. */
-function ok(data) {
-  return { success: true, data };
-}
+// Header the gateway uses to prove a request came through it (see
+// apps/file-service/middleware/requireInternal.js).
+const INTERNAL_TOKEN_HEADER = 'x-internal-token';
 
-/** Standard error envelope every service should return. */
-function fail(code, message) {
-  return { success: false, error: { code, message } };
-}
-
-module.exports = { ok, fail };
+module.exports = { ok, fail, validate, errorHandler, INTERNAL_TOKEN_HEADER, ...storageKeys };

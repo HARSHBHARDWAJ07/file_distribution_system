@@ -5,12 +5,23 @@ database as everything else) and does post-upload work off the HTTP request path
 
 For each job it reloads the file row and runs `planWork` (`lib/workPlan.js`) to decide what is still needed:
 
+- **Replication** (first): the object is copied to `replica/<storage_key>`.
 - **Thumbnail**: image uploads (`jpeg`/`png`/`webp`/`gif`) get a 200px-wide JPEG at `thumbnails/<fileId>.jpg`.
-- **Replication**: the object is copied to `replica/<storage_key>`.
 
-Each step writes its result (`thumbnail_key`, `replicated_at`) only after it succeeds. Delivery is
-at-least-once, so a redelivered job resumes from the first unfinished step, or does nothing if every step is done.
-Failures are rethrown so pg-boss retries them with backoff (3 retries).
+Replication runs first, so a problem with the preview never stops the durable copy. Each step writes its
+result (`replicated_at`, `thumbnail_key`) only after it succeeds. Delivery is at-least-once, so a redelivered
+job resumes from the first unfinished step, or does nothing if every step is done.
+
+Failures come in two kinds:
+
+- **Transient** (storage or database errors) are rethrown, so pg-boss retries them with backoff (3 retries).
+- **Permanent**: an image sharp can't decode is recorded in `thumbnail_error`, and the job completes. Retrying
+  wouldn't help, and `planWork` never schedules that thumbnail again.
+
+If the file is deleted while a job is running, the step that notices (its `UPDATE` matches no rows) deletes
+the object it just created. The file-service's delete removes the original, the thumbnail and the replica by
+their deterministic keys (`packages/shared-types/storageKeys.js`). Together, these mean no orphaned objects are
+left behind.
 
 ## Why pg-boss, not BullMQ + Redis
 

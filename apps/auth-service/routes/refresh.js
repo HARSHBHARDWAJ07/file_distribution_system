@@ -1,18 +1,20 @@
 const crypto = require('crypto');
 const { pool } = require('../lib/db');
-const { isRefreshTokenValid, revokeRefreshToken, storeRefreshToken } = require('../lib/redis');
+const { revokeRefreshToken, storeRefreshToken } = require('../lib/redis');
 const { signAccessToken } = require('../lib/jwt');
-const { ok, fail } = require('@cloudstore/shared-types');
+const { refreshBody } = require('../lib/schemas');
+const { ok, fail, validate } = require('@cloudstore/shared-types');
 
 async function refresh(req, res) {
-  const { refreshToken } = req.body;
-  if (!refreshToken || !refreshToken.includes('.')) {
-    return res.status(400).json(fail('INVALID_INPUT', 'refreshToken is required'));
-  }
+  const { data: body, error } = validate(refreshBody, req.body);
+  if (error) return res.status(400).json(error);
 
-  const [userId, tokenId] = refreshToken.split('.');
-  const valid = await isRefreshTokenValid(userId, tokenId);
-  if (!valid) {
+  const [userId, tokenId] = body.refreshToken.toLowerCase().split('.');
+
+  // Revoke-as-check: DEL reports whether the token existed, atomically. With a
+  // separate GET-then-DEL, two concurrent refreshes with the same token could
+  // both pass the GET and both be issued new tokens.
+  if (!(await revokeRefreshToken(userId, tokenId))) {
     return res.status(401).json(fail('INVALID_REFRESH_TOKEN', 'refresh token is invalid or has been used'));
   }
 
@@ -22,7 +24,6 @@ async function refresh(req, res) {
     return res.status(401).json(fail('INVALID_REFRESH_TOKEN', 'user no longer exists'));
   }
 
-  await revokeRefreshToken(userId, tokenId);
   const newTokenId = crypto.randomUUID();
   await storeRefreshToken(userId, newTokenId);
 

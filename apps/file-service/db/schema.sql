@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS files (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ,
   thumbnail_key TEXT,                      -- set by the worker once a thumbnail exists
+  thumbnail_error TEXT,                    -- set by the worker if the image cannot be decoded
   replicated_at TIMESTAMPTZ                -- set by the worker once the replica copy exists
 );
 

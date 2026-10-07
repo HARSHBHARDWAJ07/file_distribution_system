@@ -7,10 +7,11 @@
 //                          runs this on a GitHub Actions schedule, since no
 //                          free host keeps a long-running worker alive.
 const { getBoss, QUEUES } = require('@cloudstore/queue');
+const { createLogger } = require('@cloudstore/logger');
 const { pool } = require('./lib/db');
-const { planWork } = require('./lib/workPlan');
-const { generateThumbnail } = require('./jobs/generateThumbnail');
-const { replicateFile } = require('./jobs/replicate');
+const { handleFileUploaded } = require('./jobs/handleFileUploaded');
+
+const logger = createLogger('worker');
 
 // Caps parallel jobs: runner/dyno compute is small, and a burst of
 // concurrent sharp resizes is an easy way to get OOM-killed.
@@ -19,53 +20,26 @@ const CONCURRENCY = 2;
 // uploads can't keep one Actions run alive forever; the next run continues.
 const DRAIN_MAX_SECONDS = Number(process.env.DRAIN_MAX_SECONDS) || 8 * 60;
 
-async function handleFileUploaded(job) {
-  const { fileId } = job.data;
-  const { rows } = await pool.query(
-    'SELECT id, storage_key, content_type, status, thumbnail_key, replicated_at FROM files WHERE id = $1',
-    [fileId]
-  );
-  const file = rows[0];
-  if (!file) { // deleted before the job ran - nothing to do
-    console.log(`[worker] job ${job.id}: file ${fileId} no longer exists, skipping`);
-    return;
-  }
-
-  const plan = planWork(file);
-  if (plan.isFullyProcessed) {
-    console.log(`[worker] job ${job.id}: file ${fileId} already processed, skipping`);
-    return;
-  }
-
-  // Each step records its result only after it succeeds, so a crash between
-  // steps leaves the row in a state planWork can resume from.
-  if (plan.needsThumbnail) {
-    const thumbnailKey = await generateThumbnail(file);
-    await pool.query('UPDATE files SET thumbnail_key = $1 WHERE id = $2', [thumbnailKey, fileId]);
-    console.log(`[worker] job ${job.id}: thumbnail generated for ${fileId} -> ${thumbnailKey}`);
-  }
-  if (plan.needsReplication) {
-    const replicaKey = await replicateFile(file);
-    await pool.query('UPDATE files SET replicated_at = now() WHERE id = $1', [fileId]);
-    console.log(`[worker] job ${job.id}: replicated ${fileId} -> ${replicaKey}`);
-  }
+// One child logger per job, so every line it writes carries the job id.
+function runJob(job) {
+  return handleFileUploaded(job, logger.child({ jobId: job.id }));
 }
 
 async function consume(boss) {
   await boss.work(QUEUES.FILE_UPLOADED, { localConcurrency: CONCURRENCY }, async jobs => {
     for (const job of jobs) {
       try {
-        await handleFileUploaded(job);
+        await runJob(job);
       } catch (err) {
-        console.error(`[worker] job ${job.id} failed, will retry`, err);
+        logger.error({ err, jobId: job.id }, 'job failed, will retry');
         throw err; // rethrow so pg-boss applies its retry/backoff policy
       }
     }
   });
-  console.log(`[worker] consuming ${QUEUES.FILE_UPLOADED}`);
+  logger.info({ queue: QUEUES.FILE_UPLOADED }, 'consuming');
 
   const shutdown = async signal => {
-    console.log(`[worker] ${signal} received, draining`);
+    logger.info({ signal }, 'shutting down');
     await boss.stop({ graceful: true });
     await pool.end();
     process.exit(0);
@@ -87,11 +61,11 @@ async function drain(boss) {
 
     await Promise.all(jobs.map(async job => {
       try {
-        await handleFileUploaded(job);
+        await runJob(job);
         await boss.complete(QUEUES.FILE_UPLOADED, job.id);
         succeeded++;
       } catch (err) {
-        console.error(`[worker] job ${job.id} failed, will retry`, err);
+        logger.error({ err, jobId: job.id }, 'job failed, will retry');
         // fail() hands the job back to pg-boss's retry/backoff policy; a
         // retry scheduled for later is picked up by a future drain run.
         await boss.fail(QUEUES.FILE_UPLOADED, job.id, { message: err.message });
@@ -100,8 +74,8 @@ async function drain(boss) {
     }));
   }
 
-  const timedOut = Date.now() >= deadline;
-  console.log(`[worker] drain done: ${succeeded} succeeded, ${failed} failed${timedOut ? ', stopped at time limit' : ', queue empty'}`);
+  const stoppedBy = Date.now() >= deadline ? 'time limit' : 'queue empty';
+  logger.info({ succeeded, failed, stoppedBy }, 'drain done');
   if (failed && process.env.GITHUB_ACTIONS) {
     console.log(`::warning::${failed} job(s) failed and were handed back to pg-boss for retry`);
   }
@@ -120,6 +94,6 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error('[worker] fatal', err);
+  logger.fatal({ err }, 'worker crashed');
   process.exit(1);
 });

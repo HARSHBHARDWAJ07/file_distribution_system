@@ -9,12 +9,9 @@ async function storeRefreshToken(userId, tokenId) {
   await redis.set(refreshKey(userId, tokenId), '1', 'EX', REFRESH_TTL_SECONDS);
 }
 
-async function isRefreshTokenValid(userId, tokenId) {
-  return (await redis.get(refreshKey(userId, tokenId))) === '1';
-}
-
+// Returns true only for the one caller whose DEL actually removed the token.
 async function revokeRefreshToken(userId, tokenId) {
-  await redis.del(refreshKey(userId, tokenId));
+  return (await redis.del(refreshKey(userId, tokenId))) === 1;
 }
 
-module.exports = { redis, storeRefreshToken, isRefreshTokenValid, revokeRefreshToken };
+module.exports = { redis, storeRefreshToken, revokeRefreshToken };

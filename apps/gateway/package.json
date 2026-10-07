@@ -3,10 +3,18 @@
   "version": "0.2.0",
   "private": true,
   "main": "index.js",
-  "scripts": { "dev": "node index.js" },
+  "scripts": {
+    "dev": "node index.js",
+    "test": "jest"
+  },
   "dependencies": {
+    "@cloudstore/logger": "*",
     "@cloudstore/shared-types": "*",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.3.1"
   }
 }

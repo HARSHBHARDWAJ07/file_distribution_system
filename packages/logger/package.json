@@ -1,0 +1,10 @@
+{
+  "name": "@cloudstore/logger",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "pino": "^10.4.0",
+    "pino-http": "^11.0.0"
+  }
+}

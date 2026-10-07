@@ -37,6 +37,11 @@ describe('planWork', () => {
     expect(plan.isFullyProcessed).toBe(true);
   });
 
+  it('an image already found undecodable is never retried for a thumbnail', () => {
+    const plan = planWork({ content_type: 'image/png', thumbnail_key: null, thumbnail_error: 'bad input', replicated_at: new Date() });
+    expect(plan).toEqual({ needsThumbnail: false, needsReplication: false, isFullyProcessed: true });
+  });
+
   it('a job that crashed after thumbnailing but before replication only redoes replication', () => {
     const plan = planWork({ content_type: 'image/png', thumbnail_key: 'thumbnails/abc.jpg', replicated_at: null });
     expect(plan).toEqual({ needsThumbnail: false, needsReplication: true, isFullyProcessed: false });

@@ -1,15 +1,14 @@
 const { pool } = require('../lib/db');
 const storage = require('../lib/storage');
 const { shouldUseChunkedUpload, calculatePartCount, CHUNK_SIZE_BYTES } = require('../lib/chunking');
-const { ok, fail } = require('@cloudstore/shared-types');
+const { initUploadBody } = require('../lib/schemas');
+const { ok, validate } = require('@cloudstore/shared-types');
 
 async function initUpload(req, res) {
-  const ownerId = req.headers['x-user-id']; // set by the Gateway after JWT verification
-  const { filename, sizeBytes, contentType } = req.body;
-
-  if (!filename || !sizeBytes || sizeBytes <= 0) {
-    return res.status(400).json(fail('INVALID_INPUT', 'filename and a positive sizeBytes are required'));
-  }
+  const ownerId = req.userId; // set by requireInternal from the gateway's verified JWT
+  const { data: body, error } = validate(initUploadBody, req.body);
+  if (error) return res.status(400).json(error);
+  const { filename, sizeBytes, contentType } = body;
 
   const storageKey = storage.buildKey(ownerId, filename);
   const chunked = shouldUseChunkedUpload(sizeBytes);
