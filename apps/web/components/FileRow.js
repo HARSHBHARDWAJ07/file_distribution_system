@@ -35,14 +35,18 @@ export function FileRow({ file, onDownload, onDelete }) {
         : <span className="file-thumb" aria-hidden="true">{extensionOf(file.filename)}</span>}
       <div>
         <div className="file-name">{file.filename}</div>
-        <div className="file-meta">{formatBytes(file.sizeBytes)}, uploaded {formatWhen(file.completedAt || file.createdAt)}</div>
+        <div className="file-meta">
+          {confirming ? "Delete permanently? This can’t be undone." : `${formatBytes(file.sizeBytes)}, ${formatWhen(file.completedAt || file.createdAt)}`}
+        </div>
       </div>
       <div className="actions">
         {confirming ? (
           <>
             <button type="button" className="button button-danger" disabled={busy}
-              onClick={() => run(() => onDelete(file))}>Delete {file.filename}</button>
-            <button type="button" className="button button-quiet" onClick={() => setConfirming(false)}>Keep it</button>
+              onClick={() => run(() => onDelete(file))} aria-label={`Confirm delete ${file.filename}`}>
+              {busy ? 'Deleting' : 'Delete'}
+            </button>
+            <button type="button" className="button button-quiet" onClick={() => setConfirming(false)}>Cancel</button>
           </>
         ) : (
           <>
@@ -83,7 +87,7 @@ export function UnfinishedRow({ file, onResume, onRemove }) {
       <span className="file-thumb" aria-hidden="true">{extensionOf(file.filename)}</span>
       <div>
         <div className="file-name">{file.filename}</div>
-        <div className="file-meta">{formatBytes(file.sizeBytes)}, started {formatWhen(file.createdAt)}, not finished</div>
+        <div className="file-meta">{formatBytes(file.sizeBytes)}, started {formatWhen(file.createdAt)}</div>
       </div>
       <div className="actions">
         <input ref={picker} type="file" className="visually-hidden" tabIndex={-1} onChange={pick} aria-hidden="true" />

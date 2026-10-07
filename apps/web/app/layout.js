@@ -1,8 +1,9 @@
-import { Bricolage_Grotesque, Atkinson_Hyperlegible } from 'next/font/google';
+import { Instrument_Sans } from 'next/font/google';
 import './globals.css';
 
-const bricolage = Bricolage_Grotesque({ subsets: ['latin'], weight: ['700', '800'], variable: '--font-bricolage', display: 'swap' });
-const atkinson = Atkinson_Hyperlegible({ subsets: ['latin'], weight: ['400', '700'], variable: '--font-atkinson', display: 'swap' });
+// One family for everything: hierarchy comes from size and weight, not from
+// a second typeface competing for attention.
+const instrument = Instrument_Sans({ subsets: ['latin'], weight: ['400', '500', '600', '700'], variable: '--font-sans', display: 'swap' });
 
 export const metadata = {
   title: 'CloudStore',
@@ -11,7 +12,7 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${bricolage.variable} ${atkinson.variable}`}>
+    <html lang="en" className={instrument.variable}>
       <body>{children}</body>
     </html>
   );

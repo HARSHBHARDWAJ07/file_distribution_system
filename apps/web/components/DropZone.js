@@ -19,8 +19,10 @@ export default function DropZone({ onFiles, maxBytes, hasFiles }) {
       onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}
       onDrop={e => { e.preventDefault(); setOver(false); take(e.dataTransfer.files); }}
     >
-      <h1 id="dropzone-title">{hasFiles ? 'Add files' : 'Upload your first file'}</h1>
-      <p>Drop files here or choose them. Up to {formatBytes(maxBytes)} each; anything over 5 MB travels in parts, so a dropped connection only costs one part.</p>
+      <div>
+        <h2 id="dropzone-title">{over ? 'Release to upload' : hasFiles ? 'Drop files here to upload' : 'Drop your first file here'}</h2>
+        <p>Up to {formatBytes(maxBytes)} each. Files over 5 MB upload in parts, so a dropped connection can resume.</p>
+      </div>
       <input ref={input} id="file-input" type="file" multiple className="visually-hidden" tabIndex={-1} aria-hidden="true"
         onChange={e => { take(e.target.files); e.target.value = ''; }} />
       <button type="button" className="button button-primary" onClick={() => input.current?.click()}>

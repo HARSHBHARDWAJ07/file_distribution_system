@@ -9,6 +9,7 @@ import { FileRow, UnfinishedRow } from '../../components/FileRow';
 import { getApi, getUploadManager, onFileStored, onSessionLost, MAX_UPLOAD_BYTES } from '../../lib/client.js';
 import { useUploads } from '../../lib/useUploads.js';
 import { listReducer, initialListState, unfinished, stored } from '../../lib/listState.js';
+import { formatBytes } from '../../lib/format.js';
 
 const PAGE_SIZE = 20;
 
@@ -144,10 +145,19 @@ export default function FilesPage() {
       </header>
 
       <main>
+        <div className="page-head">
+          <h1>Files</h1>
+          {ready && files.length > 0 && (
+            <p>
+              {files.length}{list.nextCursor ? '+' : ''} {files.length === 1 ? 'file' : 'files'}, {formatBytes(files.reduce((sum, f) => sum + f.sizeBytes, 0))}
+            </p>
+          )}
+        </div>
+
         <DropZone onFiles={addFiles} maxBytes={MAX_UPLOAD_BYTES} hasFiles={files.length > 0} />
 
         {rejected.length > 0 && (
-          <div className="notice" role="alert" style={{ marginTop: 16 }}>
+          <div className="notice inline-gap" role="alert">
             {rejected.map(r => <p key={r.name}>{r.reason}</p>)}
           </div>
         )}
@@ -172,7 +182,7 @@ export default function FilesPage() {
           <section className="section" aria-labelledby="unfinished-title">
             <div className="section-head">
               <h2 id="unfinished-title">Unfinished uploads</h2>
-              <span>Choose the same file again to continue</span>
+              <span>Choose the same file to continue</span>
             </div>
             <ul className="rows">
               {waiting.map(f => (
@@ -184,26 +194,24 @@ export default function FilesPage() {
 
         <section className="section" aria-labelledby="files-title" aria-busy={list.status === 'loading'}>
           <div className="section-head">
-            <h2 id="files-title">Your files</h2>
-            {ready && files.length > 0 && <span>{files.length}{list.nextCursor ? '+' : ''} stored</span>}
+            <h2 id="files-title">All files</h2>
+            {ready && files.length > 0 && <span>Newest first</span>}
           </div>
 
           {list.status === 'loading' && <SkeletonRows />}
 
           {list.status === 'error' && (
-            <div style={{ marginTop: 16 }}>
-              <ErrorNote error={list.error}>
-                <p style={{ marginTop: 10 }}>
-                  <button type="button" className="button" onClick={load}>Try again</button>
-                </p>
-              </ErrorNote>
-            </div>
+            <ErrorNote error={list.error}>
+              <p className="inline-gap">
+                <button type="button" className="button" onClick={load}>Try again</button>
+              </p>
+            </ErrorNote>
           )}
 
           {ready && files.length === 0 && (
             <p className="empty">
-              <strong>Nothing stored yet</strong>
-              Drop a file above to upload your first one. Images get a thumbnail a few minutes after they land.
+              <strong>No files yet</strong>
+              Drop a file above to upload your first one.
             </p>
           )}
 
@@ -216,7 +224,7 @@ export default function FilesPage() {
           {ready && list.nextCursor && (
             <div className="load-more">
               {list.moreError && <ErrorNote error={list.moreError} />}
-              <button type="button" className="button" onClick={loadMore} disabled={list.loadingMore} style={{ marginTop: 10 }}>
+              <button type="button" className="button" onClick={loadMore} disabled={list.loadingMore}>
                 {list.loadingMore ? 'Loading' : 'Show older files'}
               </button>
             </div>
