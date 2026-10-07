@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { createLogger } = require('@cloudstore/logger');
 const { createApp } = require('../app');
-const { memoryStore } = require('../lib/rateLimit');
+const { memoryStore, fixedWindowMemoryStore } = require('../lib/rateLimit');
 
 const SECRET = 'test-jwt-secret';
 const INTERNAL = 'test-internal-token';
@@ -199,13 +199,29 @@ describe('rate limiting', () => {
     expect((await authed(request(limited).get('/api/me'), other)).status).toBe(200); // same IP, other user
   });
 
-  it('starts a fresh window once the old one expires', async () => {
+  it('lets a client back in once the sliding window has moved past its burst', async () => {
     let now = 1_000_000;
     const clocked = makeApp({ rateLimitStore: memoryStore({ now: () => now }), limits: { auth: 1, api: 100 } });
     expect((await login(clocked)).status).toBe(200);
     expect((await login(clocked)).status).toBe(429);
-    now += 61_000;
+    now += 121_000; // two windows: nothing from the burst overlaps the last 60s
     expect((await login(clocked)).status).toBe(200);
+  });
+
+  it('sliding vs fixed window: a burst straddling the boundary gets 2x through fixed, ~1x through sliding', async () => {
+    const burst = async store => {
+      let now = 59_000; // 1s before a window boundary
+      const a = makeApp({ rateLimitStore: store(() => now) });
+      let allowed = 0;
+      for (let i = 0; i < 10; i++) if ((await login(a)).status === 200) allowed++;
+      now = 61_000; // 1s after the boundary
+      for (let i = 0; i < 10; i++) if ((await login(a)).status === 200) allowed++;
+      return allowed;
+    };
+    const fixed = await burst(now => fixedWindowMemoryStore({ now }));
+    const sliding = await burst(now => memoryStore({ now }));
+    expect(fixed).toBe(20);       // 20 logins in two seconds: double the intended rate
+    expect(sliding).toBeLessThanOrEqual(11);
   });
 
   it('fails open when the store is down: traffic flows, nothing crashes', async () => {
@@ -234,16 +250,24 @@ describe('redisStore', () => {
       async incr(k) { const v = (data.get(k)?.v || 0) + 1; data.set(k, { v, ttl: data.get(k)?.ttl ?? -1 }); return v; },
       async pttl(k) { return data.has(k) ? data.get(k).ttl : -2; },
       async pexpire(k, ms) { data.get(k).ttl = ms; return 1; },
+      async get(k) { return data.has(k) ? String(data.get(k).v) : null; },
     };
   }
 
   it('heals a key left with no TTL so a client is never blocked forever', async () => {
     const redis = fakeRedis();
-    redis.data.set('rl:auth:1.2.3.4', { v: 50, ttl: -1 }); // INCR happened, process died before EXPIRE
-    const hit = await redisStore(redis).hit('rl:auth:1.2.3.4', 60);
-    expect(hit.count).toBe(51);
-    expect(redis.data.get('rl:auth:1.2.3.4').ttl).toBe(60000);
-    expect(hit.resetInMs).toBe(60000);
+    const key = 'rl:auth:1.2.3.4:1'; // window 1 = [60s, 120s)
+    redis.data.set(key, { v: 50, ttl: -1 }); // INCR happened, process died before EXPIRE
+    await redisStore(redis, { now: () => 90_000 }).hit('rl:auth:1.2.3.4', 60);
+    expect(redis.data.get(key).ttl).toBe(120000);
+  });
+
+  it('weights the previous window by how much of it is still inside the last 60s', async () => {
+    const redis = fakeRedis();
+    redis.data.set('rl:k:0', { v: 10, ttl: 1000 }); // 10 hits in window 0
+    const hit = await redisStore(redis, { now: () => 75_000 }).hit('rl:k', 60); // 15s into window 1
+    expect(hit.count).toBe(10 * 0.75 + 1);
+    expect(hit.resetInMs).toBe(45_000);
   });
 });
 

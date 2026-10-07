@@ -54,7 +54,9 @@ function requestLogger(logger) {
     },
     customSuccessMessage: (req, res) => `${req.method} ${pathOf(req)} ${res.statusCode}`,
     customErrorMessage: (req, res) => `${req.method} ${pathOf(req)} ${res.statusCode}`,
-    customProps: req => ({ userId: req.user?.id || req.userId }),
+    // ip is the client as Express resolves it through `trust proxy`, so logs
+    // also show whether the proxy-hop setting matches the real deployment.
+    customProps: req => ({ userId: req.user?.id || req.userId, ip: req.ip }),
     autoLogging: { ignore: req => pathOf(req) === '/health' },
     serializers: {
       req: req => ({ id: req.id, method: req.method, path: pathOf(req.raw || req) }),
