@@ -1,10 +1,20 @@
 {
   "CORSRules": [
     {
-      "AllowedOrigins": ["http://localhost:3000"],
-      "AllowedMethods": ["GET", "PUT"],
-      "AllowedHeaders": ["*"],
-      "ExposeHeaders": ["ETag"],
+      "AllowedOrigins": [
+        "https://file-distribution-web.onrender.com",
+        "http://localhost:3000"
+      ],
+      "AllowedMethods": [
+        "GET",
+        "PUT"
+      ],
+      "AllowedHeaders": [
+        "*"
+      ],
+      "ExposeHeaders": [
+        "ETag"
+      ],
       "MaxAgeSeconds": 3600
     }
   ]
