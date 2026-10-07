@@ -125,6 +125,8 @@ services:
       - FILE_SERVICE_URL=http://file-service:4002
       - JWT_SECRET=local-dev-secret-change-me
       - INTERNAL_API_TOKEN=local-dev-internal-token-change-me
+      - REDIS_URL=redis://redis:6379
+      - ALLOWED_ORIGINS=http://localhost:3000
     depends_on:
       - auth-service
       - file-service

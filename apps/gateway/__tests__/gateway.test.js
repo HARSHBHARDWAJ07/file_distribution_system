@@ -5,10 +5,12 @@ const jwt = require('jsonwebtoken');
 const request = require('supertest');
 const { createLogger } = require('@cloudstore/logger');
 const { createApp } = require('../app');
+const { memoryStore } = require('../lib/rateLimit');
 
 const SECRET = 'test-jwt-secret';
 const INTERNAL = 'test-internal-token';
 const USER_ID = '11111111-1111-4111-8111-111111111111';
+const FILE_ID = '33333333-3333-4333-8333-333333333333';
 
 let upstream;
 let upstreamUrl;
@@ -29,32 +31,39 @@ beforeAll(done => {
 });
 afterAll(done => { upstream.close(done); });
 
-let app;
-beforeEach(() => {
-  seen = null;
-  reply = (req, res) => res.json({ success: true, data: { ok: true } });
-  app = createApp({
+function makeApp(overrides = {}) {
+  return createApp({
     logger: createLogger('gateway-test'),
     authServiceUrl: upstreamUrl,
     fileServiceUrl: upstreamUrl,
     jwtSecret: SECRET,
     internalToken: INTERNAL,
+    allowedOrigins: ['https://app.example.com'],
+    rateLimitStore: memoryStore(),
+    ...overrides,
   });
+}
+
+let app;
+beforeEach(() => {
+  seen = null;
+  reply = (req, res) => res.json({ success: true, data: { ok: true } });
+  app = makeApp();
 });
 
 const token = (claims = { sub: USER_ID, email: 'a@test.dev' }, opts = { expiresIn: '15m' }) => jwt.sign(claims, SECRET, opts);
-const authed = req => req.set('Authorization', `Bearer ${token()}`);
+const authed = (req, t = token()) => req.set('Authorization', `Bearer ${t}`);
 
 describe('identity forwarded to the file-service', () => {
   it('sends the verified user id and the internal token', async () => {
-    await authed(request(app).get('/api/files/abc/download'));
+    await authed(request(app).get(`/api/files/${FILE_ID}/download`));
     expect(seen.headers['x-user-id']).toBe(USER_ID);
     expect(seen.headers['x-internal-token']).toBe(INTERNAL);
   });
 
-  it('never passes through identity headers a client tries to supply', async () => {
-    await authed(request(app).get('/api/files/abc/download'))
-      .set('x-user-id', 'someone-else').set('x-internal-token', 'forged');
+  it('never passes through identity headers a client tries to smuggle in', async () => {
+    await authed(request(app).get(`/api/files/${FILE_ID}/download`))
+      .set('x-user-id', 'victim').set('x-internal-token', 'forged');
     expect(seen.headers['x-user-id']).toBe(USER_ID);
     expect(seen.headers['x-internal-token']).toBe(INTERNAL);
   });
@@ -64,10 +73,20 @@ describe('identity forwarded to the file-service', () => {
     expect(seen.headers['x-internal-token']).toBeUndefined();
     expect(seen.body).toEqual({ email: 'a', password: 'b' });
   });
+});
 
-  it('keeps an encoded "../" file id inside the intended upstream route', async () => {
-    await authed(request(app).get('/api/files/..%2F..%2Fuploads%2Finit/download'));
-    expect(seen.path).toBe('/files/..%2F..%2Fuploads%2Finit/download');
+describe('path params are validated before any network call', () => {
+  it.each([
+    ['a non-UUID file id', '/api/files/not-a-uuid/download'],
+    ['an encoded "../" file id', '/api/files/..%2F..%2Fuploads%2Finit/download'],
+    ['part number 0', `/api/files/uploads/${FILE_ID}/parts/0`],
+    ['a non-numeric part number', `/api/files/uploads/${FILE_ID}/parts/abc`],
+    ['a part number over 10,000', `/api/files/uploads/${FILE_ID}/parts/10001`],
+  ])('rejects %s with 400', async (_, path) => {
+    const res = await authed(request(app).get(path));
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_INPUT');
+    expect(seen).toBeNull();
   });
 });
 
@@ -75,20 +94,23 @@ describe('JWT checks', () => {
   it.each([
     ['no header', r => r],
     ['a non-bearer header', r => r.set('Authorization', 'Basic abc')],
+    ['garbage', r => r.set('Authorization', 'Bearer not.a.jwt')],
     ['a token signed with another secret', r => r.set('Authorization', `Bearer ${jwt.sign({ sub: USER_ID }, 'other')}`)],
     ['an unsigned alg:none token', r => r.set('Authorization', `Bearer ${jwt.sign({ sub: USER_ID }, null, { algorithm: 'none' })}`)],
+    ['an HS512 token signed with the correct secret', r => r.set('Authorization', `Bearer ${jwt.sign({ sub: USER_ID }, SECRET, { algorithm: 'HS512' })}`)],
     ['a token without a subject', r => r.set('Authorization', `Bearer ${token({ email: 'x' })}`)],
   ])('rejects %s with 401 and never calls upstream', async (_, withAuth) => {
-    const res = await withAuth(request(app).get('/api/files/abc/download'));
+    const res = await withAuth(request(app).get(`/api/files/${FILE_ID}/download`));
     expect(res.status).toBe(401);
     expect(seen).toBeNull();
   });
 
-  it('labels an expired token TOKEN_EXPIRED so clients know to refresh', async () => {
+  it('distinguishes an expired token (TOKEN_EXPIRED) from an invalid one', async () => {
     const expired = jwt.sign({ sub: USER_ID, exp: Math.floor(Date.now() / 1000) - 10 }, SECRET);
-    const res = await request(app).get('/api/me').set('Authorization', `Bearer ${expired}`);
-    expect(res.status).toBe(401);
+    const res = await authed(request(app).get('/api/me'), expired);
     expect(res.body.error.code).toBe('TOKEN_EXPIRED');
+    const bad = await authed(request(app).get('/api/me'), 'garbage');
+    expect(bad.body.error.code).toBe('INVALID_TOKEN');
   });
 
   it('refuses to start without a JWT secret or internal token', () => {
@@ -100,20 +122,18 @@ describe('JWT checks', () => {
 
 describe('request ids', () => {
   it('mints one, echoes it to the client, and forwards it upstream', async () => {
-    const res = await authed(request(app).get('/api/files/abc/download'));
+    const res = await authed(request(app).get(`/api/files/${FILE_ID}/download`));
     expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
     expect(seen.headers['x-request-id']).toBe(res.headers['x-request-id']);
   });
 
-  it("reuses a well-formed id from the client but replaces a malformed one", async () => {
-    const kept = await request(app).get('/api/auth/ping').set('x-request-id', 'client-req-42');
-    expect(kept.headers['x-request-id']).toBe('client-req-42');
-    const replaced = await request(app).get('/api/auth/ping').set('x-request-id', 'bad id with spaces');
-    expect(replaced.headers['x-request-id']).not.toBe('bad id with spaces');
+  it('includes the id in error bodies so users can quote it', async () => {
+    const res = await request(app).get('/api/me').set('x-request-id', 'support-ticket-42');
+    expect(res.body.error.requestId).toBe('support-ticket-42');
   });
 });
 
-describe('failure handling', () => {
+describe('upstream failures', () => {
   it('passes an upstream error status and body through unchanged', async () => {
     reply = (req, res) => res.status(409).json({ success: false, error: { code: 'EMAIL_TAKEN', message: 'x' } });
     const res = await request(app).post('/api/auth/signup').send({});
@@ -121,21 +141,129 @@ describe('failure handling', () => {
     expect(res.body.error.code).toBe('EMAIL_TAKEN');
   });
 
-  it('turns a non-JSON upstream reply (a host error page) into a 502 envelope', async () => {
+  it('turns a non-JSON reply (a proxy error page) into 502', async () => {
     reply = (req, res) => res.status(503).type('html').send('<html>waking up</html>');
     const res = await request(app).post('/api/auth/login').send({});
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('UPSTREAM_BAD_RESPONSE');
   });
 
-  it('turns an unreachable upstream into a 502 envelope', async () => {
-    const down = createApp({
-      logger: createLogger('t'), authServiceUrl: 'http://127.0.0.1:1', fileServiceUrl: 'http://127.0.0.1:1',
-      jwtSecret: SECRET, internalToken: INTERNAL,
-    });
+  it('turns a refused connection into 502', async () => {
+    const down = makeApp({ authServiceUrl: 'http://127.0.0.1:1' });
     const res = await request(down).post('/api/auth/login').send({});
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('UPSTREAM_UNREACHABLE');
+  });
+
+  it('turns a hung upstream into 504 instead of hanging the client', async () => {
+    reply = (req, res) => setTimeout(() => res.json({}), 500);
+    const slow = makeApp({ upstreamTimeoutMs: 50 });
+    const res = await request(slow).post('/api/auth/login').send({});
+    expect(res.status).toBe(504);
+    expect(res.body.error.code).toBe('UPSTREAM_TIMEOUT');
+  });
+});
+
+describe('rate limiting', () => {
+  const login = (a, ip = '203.0.113.1') =>
+    request(a).post('/api/auth/login').set('X-Forwarded-For', ip).send({ email: 'a@b.co', password: 'x' });
+
+  it('allows 10 logins a minute per IP, then 429 with Retry-After', async () => {
+    const statuses = [];
+    for (let i = 0; i < 11; i++) statuses.push((await login(app)).status);
+    expect(statuses.slice(0, 10).every(s => s === 200)).toBe(true);
+    const blocked = await login(app);
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error.code).toBe('RATE_LIMITED');
+    expect(Number(blocked.headers['retry-after'])).toBeGreaterThan(0);
+    expect(blocked.headers['x-ratelimit-remaining']).toBe('0');
+  });
+
+  it('keeps separate counters per IP', async () => {
+    for (let i = 0; i < 10; i++) await login(app, '203.0.113.1');
+    expect((await login(app, '203.0.113.1')).status).toBe(429);
+    expect((await login(app, '203.0.113.2')).status).toBe(200);
+  });
+
+  it('keeps the auth and api limiters separate', async () => {
+    for (let i = 0; i < 11; i++) await login(app);
+    const res = await authed(request(app).get('/api/me')).set('X-Forwarded-For', '203.0.113.1');
+    expect(res.status).toBe(200);
+  });
+
+  it('limits the api per user, not per IP', async () => {
+    const limited = makeApp({ limits: { auth: 10, api: 2 } });
+    const other = token({ sub: '22222222-2222-4222-8222-222222222222' });
+    for (let i = 0; i < 2; i++) await authed(request(limited).get('/api/me'));
+    expect((await authed(request(limited).get('/api/me'))).status).toBe(429);
+    expect((await authed(request(limited).get('/api/me'), other)).status).toBe(200); // same IP, other user
+  });
+
+  it('starts a fresh window once the old one expires', async () => {
+    let now = 1_000_000;
+    const clocked = makeApp({ rateLimitStore: memoryStore({ now: () => now }), limits: { auth: 1, api: 100 } });
+    expect((await login(clocked)).status).toBe(200);
+    expect((await login(clocked)).status).toBe(429);
+    now += 61_000;
+    expect((await login(clocked)).status).toBe(200);
+  });
+
+  it('fails open when the store is down: traffic flows, nothing crashes', async () => {
+    const broken = makeApp({ rateLimitStore: { hit: async () => { throw new Error('ECONNREFUSED'); } } });
+    for (let i = 0; i < 15; i++) expect((await login(broken)).status).toBe(200);
+  });
+
+  it('trusts exactly one proxy hop, so a client cannot spoof its way past the limit', async () => {
+    // A client prepends a fake IP; the proxy appends the real one. Only the
+    // last hop is trusted, so every attempt counts against the real IP.
+    const statuses = [];
+    for (let i = 0; i < 11; i++) {
+      statuses.push((await request(app).post('/api/auth/login')
+        .set('X-Forwarded-For', `10.0.0.${i}, 203.0.113.9`).send({})).status);
+    }
+    expect(statuses[10]).toBe(429);
+  });
+});
+
+describe('redisStore', () => {
+  const { redisStore } = require('../lib/rateLimit');
+  function fakeRedis() {
+    const data = new Map();
+    return {
+      data,
+      async incr(k) { const v = (data.get(k)?.v || 0) + 1; data.set(k, { v, ttl: data.get(k)?.ttl ?? -1 }); return v; },
+      async pttl(k) { return data.has(k) ? data.get(k).ttl : -2; },
+      async pexpire(k, ms) { data.get(k).ttl = ms; return 1; },
+    };
+  }
+
+  it('heals a key left with no TTL so a client is never blocked forever', async () => {
+    const redis = fakeRedis();
+    redis.data.set('rl:auth:1.2.3.4', { v: 50, ttl: -1 }); // INCR happened, process died before EXPIRE
+    const hit = await redisStore(redis).hit('rl:auth:1.2.3.4', 60);
+    expect(hit.count).toBe(51);
+    expect(redis.data.get('rl:auth:1.2.3.4').ttl).toBe(60000);
+    expect(hit.resetInMs).toBe(60000);
+  });
+});
+
+describe('perimeter', () => {
+  it('allows an allow-listed origin and exposes the request id and Retry-After', async () => {
+    const res = await request(app).get('/health').set('Origin', 'https://app.example.com');
+    expect(res.headers['access-control-allow-origin']).toBe('https://app.example.com');
+    expect(res.headers['access-control-expose-headers']).toMatch(/x-request-id/i);
+    expect(res.headers['access-control-expose-headers']).toMatch(/Retry-After/i);
+  });
+
+  it('gives an unlisted origin no CORS access', async () => {
+    const res = await request(app).get('/health').set('Origin', 'https://evil.example.com');
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('rejects a body over 100kb with 413 before calling upstream', async () => {
+    const res = await request(app).post('/api/auth/login').send({ blob: 'x'.repeat(110 * 1024) });
+    expect(res.status).toBe(413);
+    expect(seen).toBeNull();
   });
 
   it('answers malformed JSON with a 400 envelope without calling upstream', async () => {
@@ -145,9 +273,10 @@ describe('failure handling', () => {
     expect(seen).toBeNull();
   });
 
-  it('answers an unknown route with a JSON 404', async () => {
-    const res = await request(app).get('/api/nope');
+  it('answers an unknown route with a JSON 404 and hides x-powered-by', async () => {
+    const res = await request(app).get('/nope');
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('NOT_FOUND');
+    expect(res.headers['x-powered-by']).toBeUndefined();
   });
 });

@@ -6,6 +6,7 @@ COPY apps/worker/package.json apps/worker/package.json
 COPY packages/queue packages/queue
 COPY packages/shared-types packages/shared-types
 COPY packages/logger packages/logger
+COPY packages/http-utils packages/http-utils
 RUN npm install --workspace=apps/worker --omit=dev
 
 COPY apps/worker apps/worker

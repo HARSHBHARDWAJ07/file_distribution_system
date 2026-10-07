@@ -1,8 +1,7 @@
 const crypto = require('crypto');
-const { z } = require('zod');
-const { fail, INTERNAL_TOKEN_HEADER } = require('@cloudstore/shared-types');
-
-const userIdSchema = z.uuid();
+const { AppError } = require('@cloudstore/http-utils');
+const { validateUuid } = require('@cloudstore/validation');
+const { INTERNAL_TOKEN_HEADER } = require('@cloudstore/shared-types');
 
 function tokensMatch(given, expected) {
   const a = Buffer.from(String(given || ''));
@@ -18,13 +17,13 @@ function requireInternal(internalToken) {
   if (!internalToken) throw new Error('INTERNAL_API_TOKEN must be set'); // fail closed, never open
   return (req, res, next) => {
     if (!tokensMatch(req.headers[INTERNAL_TOKEN_HEADER], internalToken)) {
-      return res.status(401).json(fail('UNAUTHORIZED', 'requests must come through the gateway'));
+      return next(new AppError(401, 'UNAUTHORIZED', 'requests must come through the gateway'));
     }
-    const parsed = userIdSchema.safeParse(req.headers['x-user-id']);
-    if (!parsed.success) {
-      return res.status(401).json(fail('UNAUTHORIZED', 'missing or invalid user id'));
+    try {
+      req.userId = validateUuid(req.headers['x-user-id'], 'x-user-id');
+    } catch {
+      return next(new AppError(401, 'UNAUTHORIZED', 'missing or invalid user id'));
     }
-    req.userId = parsed.data;
     next();
   };
 }

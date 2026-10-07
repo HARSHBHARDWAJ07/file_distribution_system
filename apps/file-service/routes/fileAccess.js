@@ -1,27 +1,22 @@
 const { pool } = require('../lib/db');
 const storage = require('../lib/storage');
 const { loadOwnedFile } = require('../lib/files');
-const { ok, fail, thumbnailKeyFor, replicaKeyFor, replicaBucket } = require('@cloudstore/shared-types');
+const { AppError } = require('@cloudstore/http-utils');
+const { ok, thumbnailKeyFor, replicaKeyFor, replicaBucket } = require('@cloudstore/shared-types');
 
 async function downloadFile(req, res) {
-  const loaded = await loadOwnedFile(req, res);
-  if (!loaded) return;
-  const { file } = loaded;
-  if (file.status !== 'complete') {
-    return res.status(404).json(fail('FILE_NOT_FOUND', 'no completed file with that id'));
-  }
+  const file = await loadOwnedFile(req.params.fileId, req.userId);
+  if (file.status !== 'complete') throw new AppError(404, 'FILE_NOT_FOUND', 'no such file');
 
-  const url = await storage.getPresignedDownloadUrl(file.storage_key);
+  const url = await storage.getPresignedDownloadUrl(file.storage_key, file.filename);
   return res.json(ok({ downloadUrl: url, filename: file.filename }));
 }
 
 async function deleteFile(req, res) {
-  const loaded = await loadOwnedFile(req, res);
-  if (!loaded) return;
-  const { file } = loaded;
+  const file = await loadOwnedFile(req.params.fileId, req.userId);
 
-  // An unfinished chunked upload holds its parts in storage until aborted;
-  // deleting only the (not yet assembled) object would leak them.
+  // An unfinished chunked upload holds its parts in storage (and on the bill)
+  // until aborted; deleting only the never-assembled object would leak them.
   if (file.upload_id && file.status !== 'complete') {
     await storage.abortMultipartUpload(file.storage_key, file.upload_id);
   }

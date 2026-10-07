@@ -8,6 +8,7 @@ let bossPromise = null;
 async function startBoss() {
   const boss = new PgBoss({
     connectionString: process.env.DATABASE_URL,
+    schema: process.env.PGBOSS_SCHEMA || 'pgboss', // overridable so tests get a throwaway queue
     ssl: process.env.DATABASE_URL?.includes('sslmode=require')
       ? { rejectUnauthorized: false } : false,
   });
@@ -44,4 +45,12 @@ async function enqueueFileUploaded(payload) {
   });
 }
 
-module.exports = { getBoss, enqueueFileUploaded, QUEUES };
+// For tests and graceful shutdown: stops the shared instance if one started.
+async function stopBoss() {
+  if (!bossPromise) return;
+  const boss = await bossPromise.catch(() => null);
+  bossPromise = null;
+  if (boss) await boss.stop({ graceful: false });
+}
+
+module.exports = { getBoss, stopBoss, enqueueFileUploaded, QUEUES };

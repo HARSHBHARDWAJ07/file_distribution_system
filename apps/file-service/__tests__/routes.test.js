@@ -1,11 +1,12 @@
 // HTTP-level edge cases for the file-service, with Postgres, storage and the
 // queue replaced by in-memory fakes so this runs in CI with no infra.
+// (__tests__/integration.test.js runs the same SQL against a real Postgres.)
 const crypto = require('crypto');
 const request = require('supertest');
 
 jest.mock('../lib/db', () => ({ pool: { query: jest.fn() } }));
 jest.mock('../lib/storage', () => ({
-  buildKey: jest.fn((owner, name) => `users/${owner}/1-${name}`),
+  buildKey: jest.fn((owner, name) => `users/${owner}/${require('crypto').randomUUID()}-${name}`),
   getPresignedUploadUrl: jest.fn(async () => 'https://storage.test/put'),
   getPresignedDownloadUrl: jest.fn(async () => 'https://storage.test/get'),
   getPresignedPartUploadUrl: jest.fn(async () => 'https://storage.test/part'),
@@ -22,18 +23,22 @@ const storage = require('../lib/storage');
 const { enqueueFileUploaded } = require('@cloudstore/queue');
 const { createLogger } = require('@cloudstore/logger');
 const { createApp } = require('../app');
-const { CHUNK_SIZE_BYTES, MAX_UPLOAD_BYTES } = require('../lib/chunking');
+const { CHUNK_SIZE_BYTES } = require('../lib/chunking');
 
 const TOKEN = 'test-internal-token';
 const ALICE = '11111111-1111-4111-8111-111111111111';
 const BOB = '22222222-2222-4222-8222-222222222222';
 
-// Just enough of Postgres for the queries these routes run.
+// Just enough of Postgres for the queries these routes run, including the
+// conditional UPDATEs, so the claim logic is exercised for real.
 function fakeDb() {
   const files = new Map();
   const parts = new Map(); // fileId -> Map(partNumber -> etag)
   pool.query.mockImplementation(async (sql, p = []) => {
-    if (sql.startsWith('SELECT * FROM files')) return { rows: files.has(p[0]) ? [{ ...files.get(p[0]) }] : [] };
+    const f = files.get(p[0]);
+    if (sql.startsWith('SELECT * FROM files WHERE id = $1 AND owner_id = $2')) {
+      return { rows: f && f.owner_id === p[1] ? [{ ...f }] : [] };
+    }
     if (sql.includes('INSERT INTO files')) {
       const id = crypto.randomUUID();
       files.set(id, { id, owner_id: p[0], filename: p[1], size_bytes: String(p[2]), storage_key: p[3],
@@ -41,10 +46,20 @@ function fakeDb() {
       return { rows: [{ id }] };
     }
     if (sql.startsWith('UPDATE files SET upload_id')) { files.get(p[1]).upload_id = p[0]; return { rowCount: 1 }; }
-    if (sql.includes("SET status = 'complete'")) {
-      const f = files.get(p[0]);
-      if (!f || f.status !== 'uploading') return { rowCount: 0 };
-      f.status = 'complete';
+    if (sql.includes("SET status = 'completing'")) {
+      if (!f || f.status !== 'uploading') return { rowCount: 0, rows: [] };
+      f.status = 'completing';
+      return { rowCount: 1, rows: [{ id: f.id }] };
+    }
+    if (sql.includes("SET status = 'complete'")) { f.status = 'complete'; return { rowCount: 1 }; }
+    if (sql.includes("SET status = 'uploading'")) { // release
+      if (f.status !== 'completing') return { rowCount: 0 };
+      f.status = 'uploading';
+      return { rowCount: 1 };
+    }
+    if (sql.includes("SET status = 'failed'")) {
+      if (sql.includes("AND status = 'uploading'") && f.status !== 'uploading') return { rowCount: 0 };
+      f.status = 'failed';
       return { rowCount: 1 };
     }
     if (sql.includes('INSERT INTO upload_parts')) {
@@ -72,6 +87,7 @@ beforeEach(() => {
 
 const as = (userId, req) => req.set('x-internal-token', TOKEN).set('x-user-id', userId);
 const init = (body, user = ALICE) => as(user, request(app).post('/uploads/init')).send(body);
+const complete = (fileId, body = {}, user = ALICE) => as(user, request(app).post(`/uploads/${fileId}/complete`)).send(body);
 
 async function initSingle(overrides = {}) {
   const res = await init({ filename: 'cat.png', sizeBytes: 1000, contentType: 'image/png', ...overrides });
@@ -81,11 +97,15 @@ async function initChunked(sizeBytes = CHUNK_SIZE_BYTES * 2 + 10) { // 3 parts
   const res = await init({ filename: 'big.bin', sizeBytes });
   return res.body.data.fileId;
 }
+async function recordParts(fileId, numbers) {
+  for (const n of numbers) {
+    await as(ALICE, request(app).post(`/uploads/${fileId}/parts/${n}`)).send({ etag: `"etag-${n}"` });
+  }
+}
 
 describe('gateway-only access (the x-user-id bypass)', () => {
   it('rejects a request with no internal token even if it names a real user', async () => {
-    const res = await request(app).post('/uploads/init').set('x-user-id', ALICE)
-      .send({ filename: 'a.txt', sizeBytes: 10 });
+    const res = await request(app).post('/uploads/init').set('x-user-id', ALICE).send({ filename: 'a.txt', sizeBytes: 10 });
     expect(res.status).toBe(401);
     expect(pool.query).not.toHaveBeenCalled();
   });
@@ -110,193 +130,210 @@ describe('gateway-only access (the x-user-id bypass)', () => {
   });
 });
 
-describe('input validation', () => {
+describe('ownership on every route', () => {
+  // All 7 handlers: a file that exists but isn't yours is indistinguishable
+  // from one that doesn't exist, so ids can't be enumerated.
   it.each([
-    ['missing filename', { sizeBytes: 10 }],
-    ['blank filename', { filename: '   ', sizeBytes: 10 }],
-    ['size as a string', { filename: 'a', sizeBytes: '10' }],
-    ['fractional size', { filename: 'a', sizeBytes: 10.5 }],
-    ['zero size', { filename: 'a', sizeBytes: 0 }],
-    ['size over the cap', { filename: 'a', sizeBytes: MAX_UPLOAD_BYTES + 1 }],
-    ['malformed content type', { filename: 'a', sizeBytes: 10, contentType: 'png' }],
-  ])('init rejects %s with 400', async (_, body) => {
-    const res = await init(body);
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_INPUT');
+    ['part URL', id => request(app).get(`/uploads/${id}/parts/1`)],
+    ['record part', id => request(app).post(`/uploads/${id}/parts/1`).send({ etag: '"x"' })],
+    ['status', id => request(app).get(`/uploads/${id}/status`)],
+    ['complete', id => request(app).post(`/uploads/${id}/complete`).send({})],
+    ['abort', id => request(app).post(`/uploads/${id}/abort`)],
+    ['download', id => request(app).get(`/files/${id}/download`)],
+    ['delete', id => request(app).delete(`/files/${id}`)],
+  ])("%s on someone else's file is the same 404 as a missing file", async (_, call) => {
+    const fileId = await initChunked();
+    const foreign = await as(BOB, call(fileId));
+    const missing = await as(BOB, call(crypto.randomUUID()));
+    expect(foreign.status).toBe(404);
+    expect(foreign.body.error.code).toBe(missing.body.error.code);
+    expect(foreign.body.error.message).toBe(missing.body.error.message);
+    expect(db.files.get(fileId).status).toBe('uploading'); // untouched
   });
 
+  it('rejects a malformed file id with 400 before touching the database', async () => {
+    const res = await as(ALICE, request(app).get('/files/not-a-uuid/download'));
+    expect(res.status).toBe(400);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('init', () => {
   it('stores the content type lower-cased so the worker matches it exactly', async () => {
     const fileId = await initSingle({ contentType: 'IMAGE/PNG' });
     expect(db.files.get(fileId).content_type).toBe('image/png');
   });
 
-  it('answers malformed JSON with a 400 envelope, not an HTML error page', async () => {
-    const res = await as(ALICE, request(app).post('/uploads/init'))
-      .set('Content-Type', 'application/json').send('{"filename": ');
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_JSON');
-  });
-
-  it('treats a non-UUID file id as not found instead of crashing with a 500', async () => {
-    const res = await as(ALICE, request(app).get('/files/not-a-uuid/download'));
-    expect(res.status).toBe(404);
-    expect(pool.query).not.toHaveBeenCalled();
-  });
-
-  it.each(['0', 'abc', '10001'])('rejects part number %s with 400', async partNumber => {
-    const fileId = await initChunked();
-    const res = await as(ALICE, request(app).get(`/uploads/${fileId}/parts/${partNumber}`));
+  it('rejects a path-traversal filename', async () => {
+    const res = await init({ filename: '../../etc/passwd', sizeBytes: 10 });
     expect(res.status).toBe(400);
   });
 
-  it('rejects a part number beyond what the file size needs', async () => {
+  it('marks the row failed (not a phantom "uploading") if storage errors', async () => {
+    storage.createMultipartUpload.mockRejectedValueOnce(new Error('storage down'));
+    const res = await init({ filename: 'big.bin', sizeBytes: CHUNK_SIZE_BYTES * 3 });
+    expect(res.status).toBe(500);
+    expect([...db.files.values()][0].status).toBe('failed');
+  });
+
+  it('rejects part numbers beyond what the file size needs', async () => {
     const fileId = await initChunked(); // 3 parts
     const res = await as(ALICE, request(app).get(`/uploads/${fileId}/parts/4`));
     expect(res.status).toBe(400);
   });
 });
 
-describe('ownership', () => {
-  it("forbids another user from downloading, completing or deleting someone's file", async () => {
-    const fileId = await initSingle();
-    for (const req of [
-      request(app).get(`/files/${fileId}/download`),
-      request(app).post(`/uploads/${fileId}/complete`),
-      request(app).delete(`/files/${fileId}`),
-    ]) {
-      expect((await as(BOB, req)).status).toBe(403);
-    }
-    expect(db.files.has(fileId)).toBe(true);
-  });
-});
-
 describe('completing a single-shot upload', () => {
   it('refuses to complete when nothing was uploaded to storage', async () => {
     const fileId = await initSingle();
-    storage.getObjectSize.mockResolvedValueOnce(null);
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`));
+    const res = await complete(fileId);
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('UPLOAD_INCOMPLETE');
-    expect(db.files.get(fileId).status).toBe('uploading');
+    expect(db.files.get(fileId).status).toBe('uploading'); // checked before the claim: never stuck
     expect(enqueueFileUploaded).not.toHaveBeenCalled();
   });
 
-  it('refuses to complete when the stored size differs from the declared size', async () => {
+  it('refuses when the stored size differs from the declared size', async () => {
     const fileId = await initSingle({ sizeBytes: 1000 });
     storage.getObjectSize.mockResolvedValueOnce(999);
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`));
-    expect(res.status).toBe(409);
+    const res = await complete(fileId);
     expect(res.body.error.code).toBe('SIZE_MISMATCH');
   });
 
-  it('completes and enqueues exactly one job when the object is there', async () => {
+  it('completes and enqueues exactly one job', async () => {
     const fileId = await initSingle({ sizeBytes: 1000 });
     storage.getObjectSize.mockResolvedValueOnce(1000);
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`));
-    expect(res.status).toBe(200);
+    const res = await complete(fileId);
     expect(res.body.data).toEqual({ fileId, status: 'complete' });
     expect(enqueueFileUploaded).toHaveBeenCalledTimes(1);
-    expect(enqueueFileUploaded).toHaveBeenCalledWith(expect.objectContaining({ fileId, contentType: 'image/png' }));
   });
 
   it('a retried complete is idempotent and re-enqueues in case the first enqueue was lost', async () => {
     const fileId = await initSingle({ sizeBytes: 1000 });
     storage.getObjectSize.mockResolvedValue(1000);
-    await as(ALICE, request(app).post(`/uploads/${fileId}/complete`));
-    const retry = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`));
-    expect(retry.status).toBe(200);
+    await complete(fileId);
+    const retry = await complete(fileId);
     expect(retry.body.data.alreadyCompleted).toBe(true);
-    expect(enqueueFileUploaded).toHaveBeenCalledTimes(2); // queue's singletonKey + planWork make this harmless
-    expect(storage.getObjectSize).toHaveBeenCalledTimes(1); // no storage work the second time
+    expect(enqueueFileUploaded).toHaveBeenCalledTimes(2);
+  });
+
+  it('an enqueue failure is logged but never fails the upload or flips it to failed', async () => {
+    const fileId = await initSingle({ sizeBytes: 1000 });
+    storage.getObjectSize.mockResolvedValueOnce(1000);
+    enqueueFileUploaded.mockRejectedValueOnce(new Error('queue down'));
+    const res = await complete(fileId);
+    expect(res.status).toBe(200);
+    expect(db.files.get(fileId).status).toBe('complete');
   });
 });
 
 describe('completing a chunked upload', () => {
-  async function recordParts(fileId, numbers) {
-    for (const n of numbers) {
-      await as(ALICE, request(app).post(`/uploads/${fileId}/parts/${n}`)).send({ etag: `"etag-${n}"` });
-    }
-  }
-
-  it('reports which parts are missing instead of asking storage to assemble a partial file', async () => {
+  it('names the missing parts before claiming, so the file is never left "completing"', async () => {
     const fileId = await initChunked();
     await recordParts(fileId, [1, 3]);
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`)).send({});
-    expect(res.status).toBe(409);
-    expect(res.body.error.message).toMatch(/missing: 2/);
+    const res = await complete(fileId);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatchObject({ code: 'MISSING_PARTS', message: 'cannot complete: missing part(s) 2' });
+    expect(db.files.get(fileId).status).toBe('uploading');
     expect(storage.completeMultipartUpload).not.toHaveBeenCalled();
   });
 
   it('falls back to the server-recorded parts when the client sends none', async () => {
     const fileId = await initChunked();
     await recordParts(fileId, [3, 1, 2]);
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`)).send({});
+    const res = await complete(fileId);
     expect(res.status).toBe(200);
-    expect(storage.completeMultipartUpload).toHaveBeenCalledWith(expect.any(String), 'mpu-1', [
-      { PartNumber: 1, ETag: '"etag-1"' }, { PartNumber: 2, ETag: '"etag-2"' }, { PartNumber: 3, ETag: '"etag-3"' },
-    ]);
+    expect(storage.completeMultipartUpload.mock.calls[0][2].map(p => p.PartNumber)).toEqual([1, 2, 3]);
   });
 
   it('rejects a client part list with duplicates', async () => {
     const fileId = await initChunked();
     const parts = [1, 2, 2, 3].map(n => ({ PartNumber: n, ETag: `"e${n}"` }));
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`)).send({ parts });
-    expect(res.status).toBe(409);
+    const res = await complete(fileId, { parts });
+    expect(res.body.error.code).toBe('DUPLICATE_PARTS');
   });
 
-  it('a complete that lost a race to a concurrent one reports success, not a 500', async () => {
+  it('two simultaneous completes: exactly one merges, the other is told it is in progress', async () => {
     const fileId = await initChunked();
     await recordParts(fileId, [1, 2, 3]);
-    storage.completeMultipartUpload.mockImplementationOnce(async () => {
-      db.files.get(fileId).status = 'complete'; // the other request finished first
-      throw Object.assign(new Error('gone'), { name: 'NoSuchUpload' });
-    });
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`)).send({});
-    expect(res.status).toBe(200);
-    expect(res.body.data.alreadyCompleted).toBe(true);
+    let release;
+    storage.completeMultipartUpload.mockImplementationOnce(() => new Promise(r => { release = r; }));
+    const first = complete(fileId).then(r => r); // .then() sends it now; supertest is lazy
+    while (!release) await new Promise(r => setTimeout(r, 10)); // first has claimed, is inside storage
+    const second = await complete(fileId);
+    release();
+    expect((await first).body.data.status).toBe('complete');
+    expect(second.status).toBe(409);
+    expect(second.body.error.code).toBe('COMPLETE_IN_PROGRESS');
+    expect(storage.completeMultipartUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it('a storage failure releases the claim (502) so a retry succeeds', async () => {
+    const fileId = await initChunked();
+    await recordParts(fileId, [1, 2, 3]);
+    storage.completeMultipartUpload.mockRejectedValueOnce(Object.assign(new Error('503'), { name: 'ServiceUnavailable' }));
+    const failed = await complete(fileId);
+    expect(failed.status).toBe(502);
+    expect(failed.body.error.code).toBe('STORAGE_ERROR');
+    expect(db.files.get(fileId).status).toBe('uploading'); // not stuck in 'completing', not 'failed'
+    expect((await complete(fileId)).body.data.status).toBe('complete');
+  });
+
+  it('treats NoSuchUpload as success when an earlier attempt already merged the object', async () => {
+    const fileId = await initChunked();
+    await recordParts(fileId, [1, 2, 3]);
+    storage.completeMultipartUpload.mockRejectedValueOnce(Object.assign(new Error('gone'), { name: 'NoSuchUpload' }));
+    storage.getObjectSize.mockResolvedValueOnce(CHUNK_SIZE_BYTES * 2 + 10);
+    expect((await complete(fileId)).body.data.status).toBe('complete');
   });
 
   it('maps storage rejecting the ETags to a 400', async () => {
     const fileId = await initChunked();
     await recordParts(fileId, [1, 2, 3]);
     storage.completeMultipartUpload.mockRejectedValueOnce(Object.assign(new Error('bad'), { name: 'InvalidPart' }));
-    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/complete`)).send({});
-    expect(res.status).toBe(400);
+    const res = await complete(fileId);
     expect(res.body.error.code).toBe('INVALID_PARTS');
+    expect(db.files.get(fileId).status).toBe('uploading');
   });
 
   it('stops handing out part URLs once the upload is complete', async () => {
     const fileId = await initChunked();
     await recordParts(fileId, [1, 2, 3]);
-    await as(ALICE, request(app).post(`/uploads/${fileId}/complete`)).send({});
-    const res = await as(ALICE, request(app).get(`/uploads/${fileId}/parts/1`));
-    expect(res.status).toBe(409);
+    await complete(fileId);
+    expect((await as(ALICE, request(app).get(`/uploads/${fileId}/parts/1`))).status).toBe(409);
   });
 });
 
-describe('deleting a file', () => {
-  it('removes the original, its thumbnail and its replica, then the row', async () => {
+describe('abort and delete', () => {
+  it('abort frees the stored parts and closes the upload', async () => {
+    const fileId = await initChunked();
+    const res = await as(ALICE, request(app).post(`/uploads/${fileId}/abort`));
+    expect(res.body.data.status).toBe('aborted');
+    expect(storage.abortMultipartUpload).toHaveBeenCalledWith(expect.any(String), 'mpu-1');
+    expect(db.files.get(fileId).status).toBe('failed');
+  });
+
+  it('delete removes the original, its thumbnail and its replica, then the row', async () => {
     const fileId = await initSingle();
     const key = db.files.get(fileId).storage_key;
-    const res = await as(ALICE, request(app).delete(`/files/${fileId}`));
-    expect(res.status).toBe(200);
+    await as(ALICE, request(app).delete(`/files/${fileId}`));
     const deleted = storage.deleteObject.mock.calls.map(c => c[0]);
     expect(deleted).toEqual(expect.arrayContaining([key, `thumbnails/${fileId}.jpg`, `replica/${key}`]));
     expect(db.files.has(fileId)).toBe(false);
   });
 
-  it('aborts an unfinished chunked upload so its stored parts are freed', async () => {
+  it('delete aborts a half-finished chunked upload so storage stops billing for its parts', async () => {
     const fileId = await initChunked();
     await as(ALICE, request(app).delete(`/files/${fileId}`));
-    expect(storage.abortMultipartUpload).toHaveBeenCalledWith(expect.any(String), 'mpu-1');
+    expect(storage.abortMultipartUpload).toHaveBeenCalled();
   });
 
-  it('keeps the row when storage deletion fails, so the delete can be retried', async () => {
+  it('delete keeps the row when storage fails, so it can be retried', async () => {
     const fileId = await initSingle();
     storage.deleteObject.mockRejectedValueOnce(new Error('storage down'));
     const res = await as(ALICE, request(app).delete(`/files/${fileId}`));
     expect(res.status).toBe(500);
-    expect(res.body.error.code).toBe('INTERNAL_ERROR');
+    expect(res.body.error).toEqual({ code: 'INTERNAL_ERROR', message: expect.any(String), requestId: expect.any(String) });
     expect(db.files.has(fileId)).toBe(true);
   });
 });

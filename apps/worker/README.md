@@ -18,6 +18,12 @@ Failures come in two kinds:
 - **Permanent**: an image sharp can't decode is recorded in `thumbnail_error`, and the job completes. Retrying
   wouldn't help, and `planWork` never schedules that thumbnail again.
 
+**Reconciliation sweep** (`lib/reconcile.js`): the file-service never fails an upload because enqueueing
+failed. That leaves a possible gap: a file that is stored but never processed. Every drain run (and every 5
+minutes in long-running mode), the worker re-enqueues `complete` files with no `replicated_at` that are more
+than 10 minutes old. The partial index `idx_files_unprocessed` serves this query. Re-enqueueing is always safe,
+because `singletonKey` dedupes jobs that are still queued and `planWork` makes finished work a no-op.
+
 If the file is deleted while a job is running, the step that notices (its `UPDATE` matches no rows) deletes
 the object it just created. The file-service's delete removes the original, the thumbnail and the replica by
 their deterministic keys (`packages/shared-types/storageKeys.js`). Together, these mean no orphaned objects are

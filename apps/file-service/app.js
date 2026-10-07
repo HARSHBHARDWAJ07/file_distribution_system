@@ -1,19 +1,22 @@
 const express = require('express');
-const { ok, errorHandler } = require('@cloudstore/shared-types');
-const { httpLogger } = require('@cloudstore/logger');
-const { asyncHandler } = require('./lib/asyncHandler');
+const { ok } = require('@cloudstore/shared-types');
+const { asyncHandler, requestId, requestLogger, notFound, errorHandler } = require('@cloudstore/http-utils');
 const { requireInternal } = require('./middleware/requireInternal');
 const { initUpload } = require('./routes/initUpload');
 const { completeUpload } = require('./routes/completeUpload');
-const { getPartUploadUrl, recordPartUploaded, getUploadStatus } = require('./routes/chunkUpload');
+const { getPartUploadUrl, recordPartUploaded, getUploadStatus, abortUpload } = require('./routes/chunkUpload');
 const { downloadFile, deleteFile } = require('./routes/fileAccess');
 
 // Built separately from listen() so tests can drive it with supertest.
 function createApp({ logger, internalToken }) {
   const app = express();
+  app.disable('x-powered-by');
 
-  app.use(httpLogger(logger));
-  app.use(express.json({ limit: '1mb' })); // largest legit body: a 10,000-entry parts list
+  app.use(requestId());
+  app.use(requestLogger(logger));
+  // File bytes never pass through the API, so a large body is always abuse.
+  // (Clients completing huge uploads omit `parts`; the recorded parts are used.)
+  app.use(express.json({ limit: '100kb' }));
 
   app.get('/health', (req, res) => {
     res.json(ok({ status: 'healthy' }));
@@ -27,11 +30,13 @@ function createApp({ logger, internalToken }) {
   app.get('/uploads/:fileId/parts/:partNumber', asyncHandler(getPartUploadUrl));
   app.post('/uploads/:fileId/parts/:partNumber', asyncHandler(recordPartUploaded));
   app.post('/uploads/:fileId/complete', asyncHandler(completeUpload));
+  app.post('/uploads/:fileId/abort', asyncHandler(abortUpload));
 
   app.get('/files/:fileId/download', asyncHandler(downloadFile));
   app.delete('/files/:fileId', asyncHandler(deleteFile));
 
-  app.use(errorHandler('file-service'));
+  app.use(notFound());
+  app.use(errorHandler(logger));
   return app;
 }
 

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS files (
   content_type TEXT,
   size_bytes BIGINT NOT NULL,
   storage_key TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL DEFAULT 'pending', -- pending -> uploading -> complete -> failed
+  status TEXT NOT NULL DEFAULT 'pending', -- pending -> uploading -> completing -> complete | failed
   upload_id TEXT,                          -- S3 multipart id, null for single-shot
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ,

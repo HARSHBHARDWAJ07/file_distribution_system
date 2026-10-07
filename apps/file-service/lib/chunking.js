@@ -1,11 +1,7 @@
+// Size limits live in @cloudstore/validation, which enforces them.
+const { CHUNK_SIZE_BYTES, MAX_PARTS, MAX_UPLOAD_BYTES } = require('@cloudstore/validation');
+
 const CHUNK_THRESHOLD_BYTES = 5 * 1024 * 1024; // files under this: single-shot
-const CHUNK_SIZE_BYTES = 5 * 1024 * 1024;       // 5MB per part - the S3 multipart minimum
-const MAX_PARTS = 10000;                         // S3 multipart maximum
-// Configurable cap, never above what MAX_PARTS chunks can hold (~48.8GB).
-const MAX_UPLOAD_BYTES = Math.min(
-  Number(process.env.MAX_UPLOAD_BYTES) || 1024 * 1024 * 1024, // 1GiB default: free storage tiers are small
-  CHUNK_SIZE_BYTES * MAX_PARTS
-);
 
 function shouldUseChunkedUpload(sizeBytes) {
   return sizeBytes > CHUNK_THRESHOLD_BYTES;

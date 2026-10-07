@@ -74,7 +74,8 @@ describe('signup validation', () => {
     pool.query.mockRejectedValueOnce(new Error('connection reset'));
     const res = await signup({ email: 'a@test.dev', password: 'password123' });
     expect(res.status).toBe(500);
-    expect(res.body.error).toEqual({ code: 'INTERNAL_ERROR', message: 'an unexpected error occurred' });
+    expect(res.body.error).toEqual({ code: 'INTERNAL_ERROR', message: 'something went wrong on our side', requestId: expect.any(String) });
+    expect(JSON.stringify(res.body)).not.toMatch(/connection reset/);
   });
 });
 
@@ -94,7 +95,9 @@ describe('login', () => {
     const unknownEmail = await login({ email: 'nobody@test.dev', password: 'nope-nope' });
     expect(wrongPassword.status).toBe(401);
     expect(unknownEmail.status).toBe(401);
-    expect(unknownEmail.body).toEqual(wrongPassword.body);
+    const { requestId: _a, ...unknownError } = unknownEmail.body.error;
+    const { requestId: _b, ...wrongError } = wrongPassword.body.error;
+    expect(unknownError).toEqual(wrongError); // same answer either way (ids aside)
   });
 
   it.each([

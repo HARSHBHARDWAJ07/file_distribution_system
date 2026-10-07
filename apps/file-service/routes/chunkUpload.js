@@ -2,52 +2,38 @@ const { pool } = require('../lib/db');
 const storage = require('../lib/storage');
 const { loadOwnedFile } = require('../lib/files');
 const { calculatePartCount, remainingParts } = require('../lib/chunking');
-const { partParams, recordPartBody } = require('../lib/schemas');
-const { ok, fail, validate } = require('@cloudstore/shared-types');
+const { validatePartNumber, validateRecordPart } = require('@cloudstore/validation');
+const { AppError } = require('@cloudstore/http-utils');
+const { ok } = require('@cloudstore/shared-types');
 
-// Shared preconditions for the per-part routes: a chunked upload that is
+// Shared preconditions for the per-part routes: the caller's chunked upload,
 // still in progress, and a part number that exists for its size.
-async function loadPartTarget(req, res) {
-  const loaded = await loadOwnedFile(req, res, partParams);
-  if (!loaded) return null;
-  const { file, params } = loaded;
-
+async function loadPartTarget(req) {
+  const file = await loadOwnedFile(req.params.fileId, req.userId);
   if (!file.upload_id) {
-    res.status(400).json(fail('NOT_CHUNKED_UPLOAD', 'this file was not initiated as a chunked upload'));
-    return null;
+    throw new AppError(400, 'NOT_CHUNKED_UPLOAD', 'this file was not initiated as a chunked upload');
   }
   if (file.status !== 'uploading') {
-    res.status(409).json(fail('UPLOAD_NOT_IN_PROGRESS', `upload is already ${file.status}`));
-    return null;
+    throw new AppError(409, 'UPLOAD_NOT_IN_PROGRESS', `upload is already ${file.status}`);
   }
-  const totalParts = calculatePartCount(file.size_bytes);
-  if (params.partNumber > totalParts) {
-    res.status(400).json(fail('INVALID_INPUT', `partNumber must be between 1 and ${totalParts}`));
-    return null;
-  }
-  return { file, partNumber: params.partNumber };
+  const partNumber = validatePartNumber(req.params.partNumber, calculatePartCount(file.size_bytes));
+  return { file, partNumber };
 }
 
 async function getPartUploadUrl(req, res) {
-  const target = await loadPartTarget(req, res);
-  if (!target) return;
-  const { file, partNumber } = target;
-
+  const { file, partNumber } = await loadPartTarget(req);
   const url = await storage.getPresignedPartUploadUrl(file.storage_key, file.upload_id, partNumber);
   return res.json(ok({ partNumber, uploadUrl: url }));
 }
 
 async function recordPartUploaded(req, res) {
-  const { data: body, error } = validate(recordPartBody, req.body);
-  if (error) return res.status(400).json(error);
-
-  const target = await loadPartTarget(req, res);
-  if (!target) return;
+  const { etag } = validateRecordPart(req.body);
+  const { file, partNumber } = await loadPartTarget(req);
 
   await pool.query(
     `INSERT INTO upload_parts (file_id, part_number, etag) VALUES ($1, $2, $3)
      ON CONFLICT (file_id, part_number) DO UPDATE SET etag = EXCLUDED.etag`,
-    [target.file.id, target.partNumber, body.etag]
+    [file.id, partNumber, etag]
   );
   return res.json(ok({ recorded: true }));
 }
@@ -61,10 +47,7 @@ async function getRecordedParts(fileId) {
 }
 
 async function getUploadStatus(req, res) {
-  const loaded = await loadOwnedFile(req, res);
-  if (!loaded) return;
-  const { file } = loaded;
-
+  const file = await loadOwnedFile(req.params.fileId, req.userId);
   const uploadedPartNumbers = (await getRecordedParts(file.id)).map(r => r.part_number);
   const totalParts = calculatePartCount(file.size_bytes);
 
@@ -76,4 +59,15 @@ async function getUploadStatus(req, res) {
   }));
 }
 
-module.exports = { getPartUploadUrl, recordPartUploaded, getUploadStatus, getRecordedParts };
+// Client gives up on an upload: free the stored parts and close the row.
+async function abortUpload(req, res) {
+  const file = await loadOwnedFile(req.params.fileId, req.userId);
+  if (file.status !== 'uploading') {
+    throw new AppError(409, 'UPLOAD_NOT_IN_PROGRESS', `upload is ${file.status}`);
+  }
+  if (file.upload_id) await storage.abortMultipartUpload(file.storage_key, file.upload_id);
+  await pool.query(`UPDATE files SET status = 'failed' WHERE id = $1 AND status = 'uploading'`, [file.id]);
+  return res.json(ok({ fileId: file.id, status: 'aborted' }));
+}
+
+module.exports = { getPartUploadUrl, recordPartUploaded, getUploadStatus, abortUpload, getRecordedParts };

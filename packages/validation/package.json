@@ -1,0 +1,17 @@
+{
+  "name": "@cloudstore/validation",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "test": "jest"
+  },
+  "dependencies": {
+    "@cloudstore/http-utils": "*",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.3.1"
+  }
+}

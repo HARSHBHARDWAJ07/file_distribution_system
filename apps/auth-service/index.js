@@ -1,14 +1,13 @@
 const { createLogger } = require('@cloudstore/logger');
-const { createApp } = require('./app');
+const { requireEnv, logProcessErrors } = require('@cloudstore/http-utils');
 
 const logger = createLogger('auth-service');
-const PORT = process.env.PORT || 4001;
+logProcessErrors(logger);
+// Without JWT_SECRET every token would be signed with "undefined".
+requireEnv(['DATABASE_URL', 'REDIS_URL', 'JWT_SECRET']);
 
-// Without it every token would be signed with "undefined" - fail at boot instead.
-if (!process.env.JWT_SECRET) {
-  logger.fatal('JWT_SECRET must be set');
-  process.exit(1);
-}
+const { createApp } = require('./app');
+const PORT = process.env.PORT || 4001;
 
 const app = createApp({ logger });
 

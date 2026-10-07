@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.637.0",
+    "@cloudstore/http-utils": "*",
     "@cloudstore/logger": "*",
     "@cloudstore/queue": "*",
     "@cloudstore/shared-types": "*",

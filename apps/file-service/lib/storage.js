@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const {
   S3Client,
   PutObjectCommand,
@@ -48,9 +49,20 @@ const presignClient = process.env.STORAGE_PUBLIC_ENDPOINT
     })
   : s3;
 
+// randomUUID, not Date.now(): two uploads of one filename in the same
+// millisecond would collide on the UNIQUE storage_key. The name part is only
+// a readable hint (sanitized, capped); the real name lives in the database.
 function buildKey(ownerId, filename) {
-  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-  return `users/${ownerId}/${Date.now()}-${safeName}`;
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100);
+  return `users/${ownerId}/${crypto.randomUUID()}-${safeName}`;
+}
+
+// RFC 6266: a plain-ASCII fallback plus the exact UTF-8 name for browsers
+// that support filename*.
+function attachmentDisposition(filename) {
+  const ascii = filename.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  const encoded = encodeURIComponent(filename).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
 async function getPresignedUploadUrl(key, contentType) {
@@ -58,8 +70,14 @@ async function getPresignedUploadUrl(key, contentType) {
   return getSignedUrl(presignClient, command, { expiresIn: PRESIGN_EXPIRY_SECONDS });
 }
 
-async function getPresignedDownloadUrl(key) {
-  const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+// Forces a download under the original name. Without it an uploaded .html or
+// .svg could render inline from the storage origin - a stored-XSS vector.
+async function getPresignedDownloadUrl(key, filename) {
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ResponseContentDisposition: attachmentDisposition(filename),
+  });
   return getSignedUrl(presignClient, command, { expiresIn: PRESIGN_EXPIRY_SECONDS });
 }
 
@@ -120,6 +138,8 @@ async function abortMultipartUpload(key, uploadId) {
 
 module.exports = {
   buildKey,
+  attachmentDisposition,
+  PRESIGN_EXPIRY_SECONDS,
   getPresignedUploadUrl,
   getPresignedDownloadUrl,
   deleteObject,

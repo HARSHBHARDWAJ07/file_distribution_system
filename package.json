@@ -15,6 +15,7 @@
     "dev:files": "npm run dev --workspace=apps/file-service",
     "dev:worker": "npm run dev --workspace=apps/worker",
     "lint": "echo \"(placeholder) no linter configured yet\" && exit 0",
-    "test": "npm test --workspace=apps/auth-service && npm test --workspace=apps/file-service && npm test --workspace=apps/worker && npm test --workspace=apps/gateway"
+    "test": "npm test --workspaces --if-present",
+    "test:integration": "jest --testPathPattern integration && node --test packages/queue/integration/queue.test.cjs"
   }
 }

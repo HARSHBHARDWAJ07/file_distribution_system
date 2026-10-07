@@ -1,26 +1,26 @@
 const bcrypt = require('bcrypt');
 const { pool } = require('../lib/db');
-const { signupBody } = require('../lib/schemas');
-const { ok, fail, validate } = require('@cloudstore/shared-types');
+const { validateSignup } = require('@cloudstore/validation');
+const { AppError } = require('@cloudstore/http-utils');
+const { ok } = require('@cloudstore/shared-types');
 
 const SALT_ROUNDS = 12;
 
 async function signup(req, res) {
-  const { data: body, error } = validate(signupBody, req.body);
-  if (error) return res.status(400).json(error);
-
-  const passwordHash = await bcrypt.hash(body.password, SALT_ROUNDS);
+  const { email, password } = validateSignup(req.body);
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
   try {
-    const result = await pool.query(
+    const { rows } = await pool.query(
       'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
-      [body.email, passwordHash]
+      [email, passwordHash]
     );
-    return res.status(201).json(ok({ user: result.rows[0] }));
+    req.log.info({ userId: rows[0].id }, 'signup');
+    return res.status(201).json(ok({ user: rows[0] }));
   } catch (err) {
     if (err.code === '23505') { // unique_violation
-      return res.status(409).json(fail('EMAIL_TAKEN', 'an account with this email already exists'));
+      throw new AppError(409, 'EMAIL_TAKEN', 'an account with this email already exists');
     }
-    throw err; // the error handler logs it and returns a 500 envelope
+    throw err; // everything else -> central error handler (logged, generic 500)
   }
 }
 

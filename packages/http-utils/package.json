@@ -1,0 +1,18 @@
+{
+  "name": "@cloudstore/http-utils",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "test": "jest"
+  },
+  "dependencies": {
+    "@cloudstore/shared-types": "*",
+    "pino-http": "^11.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "pino": "^10.4.0",
+    "supertest": "^7.3.1"
+  }
+}
